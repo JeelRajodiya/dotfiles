@@ -54,6 +54,9 @@ if [ "$OS" = "Linux" ]; then
     curl -fsSL https://alexpasmantier.github.io/television/install.sh | bash
     # Install Atuin shell history.
     curl --proto '=https' --tlsv1.2 -LsSf https://setup.atuin.sh | sh
+    # Install uv for Python command-line tools.
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
 
     # Install Rust before building Yazi.
     if ! command -v cargo &>/dev/null; then
@@ -84,6 +87,8 @@ else
     echo "Unsupported OS: $OS" >&2
     exit 1
 fi
+
+uv tool install graphifyy
 
 # Install NVM and the current Node.js release.
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.3/install.sh | bash
