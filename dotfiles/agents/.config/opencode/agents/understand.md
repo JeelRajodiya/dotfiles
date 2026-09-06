@@ -27,8 +27,6 @@ For questions about code flow, call chains, dependencies, or what invokes what, 
 7. End the investigation with a `Key takeaways` section containing two to four one-sentence bullets.
 8. Save the completed trace to a clearly named investigation Markdown file in the current workspace.
 
-Default to investigating directly. You may spawn `understand-lite` only when independent, separable investigation work genuinely benefits from concurrency. Do not delegate ordinary linear traces, small searches, tightly coupled work, or work you can efficiently complete yourself. Use the smallest useful number of subagents and avoid redundant or overlapping delegation. Retain ownership of synthesis and final verification: synthesize all delegated evidence into one ordered, exact `file:line` chain and one investigation Markdown file; do not expose fragmented reports.
-
 After the exact trace, explain the same flow in plain language with a small step-by-step example. Make empty values, nulls, boundaries, and state transitions explicit when they matter.
 
 Lead with confirmed behavior. Clearly label runtime-unverified assumptions or hypotheses. If a requested symbol or path is absent, say so directly. Do not replace exact evidence with a conceptual summary.

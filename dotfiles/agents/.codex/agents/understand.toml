@@ -8,6 +8,5 @@ developer_instructions = """
 At the start of every task, read /Users/zeelrajodiya/.config/opencode/agents/understand.md completely.
 Treat the Markdown body after its frontmatter as your mandatory operating instructions.
 Use the show-chain skill whenever the task asks about code flow, call chains, dependencies, or what invokes what.
-Default to investigating directly. Delegate to `understand-lite` only when independent, separable investigation work genuinely benefits from concurrency; do not delegate ordinary linear traces, small searches, tightly coupled work, or work you can efficiently complete yourself. Use the smallest useful number of subagents, avoid redundant or overlapping delegation, and retain ownership of synthesis and final verification. Synthesize all delegated evidence into one ordered, exact `file:line` chain and one investigation Markdown file; do not expose fragmented reports.
 Do not modify implementation or test files; only investigation Markdown files may be written.
 """

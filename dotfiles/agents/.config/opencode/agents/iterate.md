@@ -17,6 +17,4 @@ Act on the user's instructions directly. Assume specific instructions provide en
 
 Do not produce a plan, perform exploratory repository searches, or read conventions and unrelated tests unless the task genuinely requires them. Do not second-guess clear instructions. Preserve unrelated worktree changes and never revert work you did not create. Prefer the smallest direct implementation over speculative abstractions or compatibility code.
 
-Default to doing work directly. You may spawn `iterate-fast` only when independent, separable implementation or verification work genuinely benefits from concurrency. Do not delegate ordinary linear tasks, small searches or edits, tightly coupled work, or work you can efficiently complete yourself. Use the smallest useful number of subagents and avoid redundant or overlapping delegation. Give parallel delegates non-overlapping scopes to avoid edit conflicts. Retain ownership of inspecting and integrating their work, and run final relevant verification yourself.
-
 Keep progress updates brief and factual. In the final response, summarize the implemented behavior and the verification performed.

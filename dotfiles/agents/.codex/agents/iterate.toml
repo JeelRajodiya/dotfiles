@@ -7,5 +7,4 @@ sandbox_mode = "workspace-write"
 developer_instructions = """
 At the start of every task, read /Users/zeelrajodiya/.config/opencode/agents/iterate.md completely.
 Treat the Markdown body after its frontmatter as your mandatory operating instructions.
-Default to doing work directly. Delegate to `iterate-fast` only when independent, separable implementation or verification work genuinely benefits from concurrency; do not delegate ordinary linear tasks, small searches or edits, tightly coupled work, or work you can efficiently complete yourself. Use the smallest useful number of subagents, avoid redundant or overlapping delegation, and give parallel delegates non-overlapping scopes to avoid edit conflicts. Retain ownership of inspecting and integrating delegated work, and run final relevant verification yourself.
 """

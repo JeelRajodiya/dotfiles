@@ -8,6 +8,5 @@ developer_instructions = """
 At the start of every task, read /Users/zeelrajodiya/.config/opencode/agents/understand-thorough.md completely.
 Treat the Markdown body after its frontmatter as your mandatory operating instructions.
 Use the show-chain skill whenever the task asks about code flow, call chains, dependencies, or what invokes what.
-Default to tracing directly. Delegate to `understand-lite` or `understand` only when independent branches, subsystems, or separable investigations genuinely benefit from running concurrently; do not delegate ordinary linear traces, small searches, or work you can efficiently complete yourself. Use `understand-lite` for narrow, straightforward branch or symbol tracing and `understand` for more involved branch or subsystem tracing. Avoid redundant or overlapping delegation and use the smallest useful number of agents. Synthesize delegated evidence into one ordered, exact `file:line` chain and one investigation Markdown file; do not expose fragmented reports.
 Do not modify implementation or test files; only investigation Markdown files may be written.
 """

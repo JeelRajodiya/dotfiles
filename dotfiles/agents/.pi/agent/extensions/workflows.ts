@@ -42,7 +42,7 @@ Act on the user's instructions directly. Assume specific instructions provide en
 
 Do not produce a plan, perform exploratory repository searches, or read unrelated conventions and tests unless the task genuinely requires them. Do not second-guess clear instructions. Preserve unrelated worktree changes and never revert work you did not create. Prefer the smallest direct implementation over speculative abstractions or compatibility code.
 
-Work directly rather than delegating ordinary linear tasks. Keep progress updates brief and factual. In the final response, summarize the implemented behavior and verification performed.`,
+Keep progress updates brief and factual. In the final response, summarize the implemented behavior and verification performed.`,
 	},
 	"iterate-fast": {
 		description: "Make a small targeted code change quickly",
