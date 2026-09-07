@@ -24,7 +24,6 @@
   },
   "packages": [
     "npm:pi-web-access",
-    "npm:pi-subagents",
     {
       "source": "npm:@dietrichgebert/ponytail",
       "extensions": []
