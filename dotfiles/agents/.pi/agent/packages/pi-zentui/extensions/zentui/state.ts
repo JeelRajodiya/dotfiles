@@ -69,6 +69,16 @@ export function syncState(
 	telemetry: FooterTelemetry = {},
 ): void {
 	const totals = getUsageTotals(ctx);
+	const seenSubagentUsage = new Set<string>();
+	const subagentCost = ctx.sessionManager.getEntries()
+		.filter(entry => entry.type === "custom" && entry.customType === "agent-team-usage")
+		.reduce((total, entry) => {
+			const data = entry.data as { sourceEventId?: unknown; usage?: { cost?: { total?: unknown } } } | undefined;
+			if (typeof data?.sourceEventId !== "string" || seenSubagentUsage.has(data.sourceEventId)) return total;
+			seenSubagentUsage.add(data.sourceEventId);
+			const cost = data.usage?.cost?.total;
+			return total + (typeof cost === "number" && Number.isFinite(cost) ? cost : 0);
+		}, 0);
 	const m = ctx.model;
 	state.modelId = m?.id ?? "";
 	state.modelName = m?.name ?? "";
@@ -85,7 +95,7 @@ export function syncState(
 	state.tokenLabel = buildTokenLabel(totals, cacheHitIcon);
 	state.cacheReadLabel = buildCacheReadLabel(totals.cacheRead);
 	state.cacheWriteLabel = buildCacheWriteLabel(totals.cacheWrite);
-	state.costLabel = buildCostLabel(totals);
+	state.costLabel = buildCostLabel({ ...totals, cost: totals.cost + subagentCost });
 	state.subscription = telemetry.subscription === true;
 	state.autoCompaction = telemetry.autoCompaction === true;
 }

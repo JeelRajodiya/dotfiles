@@ -1,4 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
+import { relative, resolve } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export default function (_pi: ExtensionAPI): void {}
 
 export function contextTokensFromUsage(usage: unknown): number | undefined {
 	if (!usage || typeof usage !== "object") return undefined;
@@ -26,8 +30,58 @@ export function latestAssistantContextTokens(sessionFile: string): number | unde
 	return latest;
 }
 
+export function latestChildTranscript(sessionFile: string, maxChars = 2000): string {
+	if (!existsSync(sessionFile)) return "";
+	const lines: string[] = [];
+	for (const line of readFileSync(sessionFile, "utf-8").split("\n")) {
+		try {
+			const message = JSON.parse(line)?.message;
+			if (!message || (message.role !== "user" && message.role !== "assistant")) continue;
+			const content = typeof message.content === "string"
+				? message.content
+				: Array.isArray(message.content)
+					? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("")
+					: "";
+			if (content) lines.push(`${message.role}: ${content}`);
+		} catch {}
+	}
+	return lines.join("\n").slice(-maxChars);
+}
+
 export function hasRunningAgent(states: Iterable<{ status: string }>): boolean {
 	return Array.from(states).some(state => state.status === "running");
+}
+
+function safePathComponent(value: string, label: string): string {
+	if (!/^[a-zA-Z0-9_-]+$/.test(value)) throw new Error(`Invalid ${label}`);
+	return value;
+}
+
+export function childSessionPath(root: string, parentSessionId: string, agentName: string): string {
+	const parent = safePathComponent(parentSessionId, "parent session ID");
+	const agent = safePathComponent(agentName.toLowerCase().replace(/\s+/g, "-"), "agent name");
+	const base = resolve(root);
+	const path = resolve(base, parent, `${agent}.json`);
+	if (relative(base, path).startsWith("..")) throw new Error("Child session path escapes root");
+	return path;
+}
+
+export function formatAgentContext(tokens: number, contextWindow: number): string {
+	const format = (value: number) => value >= 1000 ? `${Math.round(value / 1000)}k` : `${Math.round(value)}`;
+	return `${format(tokens)}/${contextWindow > 0 ? format(contextWindow) : "?"}`;
+}
+
+export function aggregateAgentUsageCost(entries: Iterable<unknown>): number {
+	const seen = new Set<string>();
+	let total = 0;
+	for (const entry of entries) {
+		const data = entry as { sourceEventId?: unknown; usage?: { cost?: { total?: unknown } } };
+		if (typeof data.sourceEventId !== "string" || seen.has(data.sourceEventId)) continue;
+		seen.add(data.sourceEventId);
+		const cost = data.usage?.cost?.total;
+		if (typeof cost === "number" && Number.isFinite(cost)) total += cost;
+	}
+	return total;
 }
 
 type PendingRpc = {

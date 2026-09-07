@@ -29,9 +29,12 @@ import { homedir } from "os";
 import { join, resolve } from "path";
 import {
 	AgentRpcTransport,
+	childSessionPath,
 	contextTokensFromUsage,
+	formatAgentContext,
 	hasRunningAgent,
 	latestAssistantContextTokens,
+	latestChildTranscript,
 	shouldFinalizeAgentEvent,
 	terminateChild,
 } from "./agent-team-helpers";
@@ -54,6 +57,8 @@ interface ActiveAgentRun {
 	initialTask: string;
 	sessionFile: string;
 	startTime: number;
+	runId: string;
+	usageSequence: number;
 	accepted: boolean;
 	finished: boolean;
 	stopping: boolean;
@@ -66,8 +71,10 @@ interface AgentState {
 	toolCount: number;
 	elapsed: number;
 	lastWork: string;
+	history: string;
 	contextTokens?: number;
 	contextWindow: number;
+	cost: number;
 	sessionFile: string | null;
 	runCount: number;
 	timer?: ReturnType<typeof setInterval>;
@@ -173,6 +180,8 @@ export default function (pi: ExtensionAPI) {
 	let gridCols = 2;
 	let widgetCtx: any;
 	let sessionDir = "";
+	let parentSessionId = "";
+	let viewedAgent: AgentState | undefined;
 	let directAgent: AgentDef | undefined;
 	let normalMode = false;
 	let defaultTools: string[] = [];
@@ -227,12 +236,12 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function sessionPath(def: AgentDef): string {
-		const key = def.name.toLowerCase().replace(/\s+/g, "-");
-		return join(sessionDir, `${key}.json`);
+		return childSessionPath(sessionDir, parentSessionId, def.name);
 	}
 
 	function ensureSession(def: AgentDef, cwd: string): string {
 		const path = sessionPath(def);
+		if (!existsSync(join(sessionDir, parentSessionId))) mkdirSync(join(sessionDir, parentSessionId), { recursive: true });
 		if (!existsSync(path)) {
 			writeFileSync(path, JSON.stringify({
 				type: "session",
@@ -314,8 +323,10 @@ export default function (pi: ExtensionAPI) {
 			toolCount: 0,
 			elapsed: 0,
 			lastWork: "",
-			contextTokens: latestAssistantContextTokens(file),
+			history: latestChildTranscript(file),
+			contextTokens: latestAssistantContextTokens(file) ?? 0,
 			contextWindow: modelContextWindow(effectiveAgentModel(def, widgetCtx), widgetCtx),
+			cost: 0,
 			sessionFile: existsSync(file) ? file : null,
 			runCount: 0,
 		};
@@ -359,10 +370,7 @@ export default function (pi: ExtensionAPI) {
 		const statusLine = theme.fg(statusColor, statusStr + timeStr);
 		const statusVisible = statusStr.length + timeStr.length;
 
-		const formatTokens = (tokens: number) => tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : `${Math.round(tokens)}`;
-		const ctxStr = `${state.contextTokens === undefined ? "?" : formatTokens(state.contextTokens)}/${
-			state.contextWindow > 0 ? formatTokens(state.contextWindow) : "?"
-		}`;
+		const ctxStr = formatAgentContext(state.contextTokens ?? 0, state.contextWindow);
 		const ctxLine = theme.fg("dim", ctxStr);
 		const ctxVisible = ctxStr.length;
 
@@ -398,6 +406,17 @@ export default function (pi: ExtensionAPI) {
 
 			return {
 				render(width: number): string[] {
+					if (viewedAgent) {
+						const state = viewedAgent;
+						const history = state.history || state.lastWork || "No child output yet.";
+						text.setText([
+							theme.fg("accent", `${displayName(state.def.name)} · ${state.status}`),
+							theme.fg("dim", `${state.contextTokens ?? 0}/${state.contextWindow || "?"} tokens · ${state.toolCount} tools · ${Math.round(state.elapsed / 1000)}s`),
+							theme.fg("muted", history.slice(-2000)),
+							theme.fg("dim", "Use /agent exit to return."),
+						].join("\n"));
+						return text.render(width);
+					}
 					if (agentStates.size === 0) {
 						text.setText(theme.fg("dim", "No agents found. Add .md files to agents/"));
 						return text.render(width);
@@ -485,6 +504,7 @@ export default function (pi: ExtensionAPI) {
 		state.toolCount = 0;
 		state.elapsed = 0;
 		state.lastWork = "";
+		state.history = latestChildTranscript(sessionPath(state.def));
 		state.runCount++;
 
 		const startTime = Date.now();
@@ -493,8 +513,7 @@ export default function (pi: ExtensionAPI) {
 			updateWidget();
 		}, 1000);
 
-		const agentKey = state.def.name.toLowerCase().replace(/\s+/g, "-");
-		const agentSessionFile = join(sessionDir, `${agentKey}.json`);
+		const agentSessionFile = ensureSession(state.def, ctx.cwd);
 		const args = [
 			"--mode", "rpc",
 			"--no-extensions",
@@ -517,6 +536,8 @@ export default function (pi: ExtensionAPI) {
 			initialTask: task,
 			sessionFile: agentSessionFile,
 			startTime,
+			runId: randomUUID(),
+			usageSequence: 0,
 			accepted: false,
 			finished: false,
 			stopping: false,
@@ -525,6 +546,17 @@ export default function (pi: ExtensionAPI) {
 		updateWidget();
 
 		let buffer = "";
+		const persistUsage = (eventType: string, message: any, usage: any) => {
+			if (!usage || typeof usage !== "object") return;
+			const sourceEventId = `${run.runId}:${eventType}:${++run.usageSequence}`;
+			pi.appendEntry("agent-team-usage", {
+				sourceEventId,
+				usage,
+				provider: message?.provider,
+				model: message?.model,
+			});
+			pi.events.emit("agent-team:usage");
+		};
 		const handleEvent = (event: any) => {
 			if (transport.handle(event)) return;
 			if (event.type === "message_update") {
@@ -533,6 +565,7 @@ export default function (pi: ExtensionAPI) {
 					run.textChunks.push(delta.delta || "");
 					const full = run.textChunks.join("");
 					state.lastWork = full.split("\n").filter((line: string) => line.trim()).pop() || "";
+					state.history = `${state.history}\nassistant: ${delta.delta || ""}`.slice(-2000);
 					updateWidget();
 				}
 			} else if (event.type === "tool_execution_start") {
@@ -540,10 +573,11 @@ export default function (pi: ExtensionAPI) {
 				updateWidget();
 			} else if (event.type === "message_end") {
 				const tokens = contextTokensFromUsage(event.message?.usage);
-				if (tokens !== undefined) {
-					state.contextTokens = tokens;
-					updateWidget();
-				}
+				if (tokens !== undefined) state.contextTokens = tokens;
+				persistUsage("message", event.message, event.message?.usage);
+				updateWidget();
+			} else if (event.type === "compaction_end") {
+				persistUsage("compaction", event.result, event.result?.usage);
 			} else if (event.type === "agent_end") {
 				const last = [...(event.messages || [])]
 					.reverse()
@@ -738,7 +772,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			const [agent, model, ...extra] = args.trim().split(/\s+/);
 			if (!agent) {
-				ctx.ui.notify(allAgentDefs.map(def => `${displayName(def.name)}: ${modelSetting(def, ctx)}`).join("\n"), "info");
+				ctx.ui.notify(Array.from(agentStates.values()).map(state => `${displayName(state.def.name)}: ${modelSetting(state.def, ctx)}`).join("\n"), "info");
 				return;
 			}
 			if (!model || extra.length > 0) {
@@ -754,11 +788,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("agent", {
-		description: "Open an agent's chat session, or return with /agent exit",
+		description: "View an agent's existing background state, or return with /agent exit",
 		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
-			const names = directAgent || normalMode
-				? [...(directAgent ? ["exit"] : []), ...allAgentDefs.map(def => def.name)]
-				: Array.from(agentStates.values()).map(state => state.def.name);
+			const names = viewedAgent
+				? ["exit"]
+				: normalMode
+					? allAgentDefs.map(def => def.name)
+					: Array.from(agentStates.values()).map(state => state.def.name);
 			const items = names
 				.filter(name => name.startsWith(prefix))
 				.map(name => ({ value: name, label: name }));
@@ -766,25 +802,14 @@ export default function (pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			const requested = args.trim();
-			if (hasRunningAgent(agentStates.values())) {
-				ctx.ui.notify("Wait for running team agents before switching sessions", "warning");
-				return;
-			}
-			if (directAgent && (!requested || requested === directAgent.name)) {
-				ctx.ui.notify(`Chatting with ${displayName(directAgent.name)}. Use /agent exit to return.`, "info");
-				return;
-			}
-
 			if (requested === "exit") {
-				const current = ctx.sessionManager.getSessionFile();
-				const parentFile = current ? `${current}.parent` : "";
-				if (!parentFile || !existsSync(parentFile)) {
-					ctx.ui.notify("No parent chat found. Use /resume to switch sessions.", "warning");
-					return;
-				}
-				const parent = readFileSync(parentFile, "utf-8").trim();
-				const result = await ctx.switchSession(parent);
-				if (!result.cancelled) unlinkSync(parentFile);
+				viewedAgent = undefined;
+				ctx.ui.setStatus("agent-team", undefined);
+				updateWidget();
+				return;
+			}
+			if (viewedAgent) {
+				ctx.ui.notify(`Viewing ${displayName(viewedAgent.def.name)}. Use /agent exit to return.`, "info");
 				return;
 			}
 
@@ -798,24 +823,20 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const def = allAgentDefs.find(agent => agent.name.toLowerCase() === name.toLowerCase());
-			const allowed = directAgent || normalMode || agentStates.has(name.toLowerCase());
+			const allowed = normalMode || agentStates.has(name.toLowerCase());
 			if (!def || !allowed) {
 				ctx.ui.notify(`Agent "${name}" is not in the active team`, "error");
 				return;
 			}
 
-			const current = ctx.sessionManager.getSessionFile();
-			const parent = directAgent && current && existsSync(`${current}.parent`)
-				? readFileSync(`${current}.parent`, "utf-8").trim()
-				: current;
-			if (!parent) {
-				ctx.ui.notify("Direct agent chat requires a saved parent session", "error");
+			const state = agentStates.get(def.name.toLowerCase());
+			if (!state) {
+				ctx.ui.notify(`Agent "${name}" is not active`, "error");
 				return;
 			}
-
-			const target = ensureSession(def, ctx.cwd);
-			writeFileSync(`${target}.parent`, parent + "\n");
-			await ctx.switchSession(target);
+			viewedAgent = state;
+			ctx.ui.setStatus("agent-team", `Viewing: ${displayName(def.name)}`);
+			updateWidget();
 		},
 	});
 
@@ -907,6 +928,22 @@ export default function (pi: ExtensionAPI) {
 
 	// ── System Prompt Override ───────────────────
 
+	pi.on("input", async (event, ctx) => {
+		if (!viewedAgent || event.text.startsWith("/")) return;
+		try {
+			const submitted = await submitAgent(viewedAgent.def.name, event.text, ctx);
+			ctx.ui.notify(
+				submitted.status === "steered"
+					? `${displayName(viewedAgent.def.name)} steering accepted`
+					: `${displayName(viewedAgent.def.name)} started`,
+				"info",
+			);
+		} catch (error) {
+			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		}
+		return { action: "handled" as const };
+	});
+
 	pi.on("before_agent_start", async (_event, _ctx) => {
 		if (normalMode) return;
 		if (directAgent) {
@@ -979,27 +1016,16 @@ ${agentCatalog}`,
 			widgetCtx.ui.setWidget("agent-team", undefined);
 		}
 		widgetCtx = _ctx;
+		parentSessionId = _ctx.sessionManager.getSessionId();
+		viewedAgent = undefined;
 		defaultTools = pi.getActiveTools().filter(tool => !TEAM_TOOLS.includes(tool));
 		loadAgents(_ctx.cwd);
 		agentModelOverrides.clear();
 
-		const currentSession = _ctx.sessionManager.getSessionFile();
-		directAgent = currentSession
-			? allAgentDefs.find(def => resolve(sessionPath(def)) === resolve(currentSession))
-			: undefined;
+		directAgent = undefined;
 
 		normalMode = false;
-		if (directAgent) {
-			const available = new Set(pi.getAllTools().map(tool => tool.name));
-			pi.setActiveTools(directAgent.tools.split(",").map(tool => tool.trim()).filter(tool => available.has(tool)));
-			_ctx.ui.setStatus("agent-team", `Chat: ${displayName(directAgent.name)}`);
-			_ctx.ui.notify(
-				`Direct chat with ${displayName(directAgent.name)}\n` +
-				`Use the normal model controls to change models.\n` +
-				`/agent exit          Return to the parent chat`,
-				"info",
-			);
-		} else {
+		{
 			const savedOverrides = _ctx.sessionManager.getEntries()
 				.filter(entry => entry.type === "custom" && entry.customType === "agent-team-model-overrides")
 				.pop()?.data as { overrides?: Record<string, string> } | undefined;

@@ -1306,6 +1306,12 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.events.on("agent-team:usage", () => {
+		if (!activeTuiContext) return;
+		syncFooterState(activeTuiContext);
+		refresh();
+	});
+
 	const unsubscribeFast = pi.events.on("openai-fast:changed", () => {
 		if (activeTuiContext) {
 			syncFooterState(activeTuiContext);
