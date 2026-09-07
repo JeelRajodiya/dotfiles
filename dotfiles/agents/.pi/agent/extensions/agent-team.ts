@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
 	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, canClearAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
-	formatToolActivity, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, rootTools, sessionTokenCounts, shouldCompleteTellTarget, shouldFinalizeAgentEvent, terminateChild, type AgentCompletionStatus, type TokenCounts,
+	formatToolActivity, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent, restoreWaitingAgents, rootTools, sessionTokenCounts, shouldCompleteTellTarget, shouldFinalizeAgentEvent, terminateChild, type AgentCompletionStatus, type TokenCounts,
 } from "./agent-team-helpers";
 import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity";
 import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs";
@@ -40,7 +40,8 @@ export default function (pi: ExtensionAPI) {
 	let allAgentDefs: AgentDef[] = []; let teams: Record<string, TeamDef> = {};
 	let widgetCtx: any; let sessionDir = ""; let parentSessionId = "";
 	let viewedAgent: AgentState | undefined; let rootAgent: AgentState | undefined;
-	let agentAutocompleteInstalled = false; let gridCols = 3; let rootStartTime = 0;
+	let agentAutocompleteInstalled = false; let gridCols = 3; let rootStartTime = 0; let hostBusy = false;
+	const pendingDeliveries: AgentState[] = [];
 	/** The host's own tools, captured before this extension first narrowed them, so demote can give them back. */
 	let hostTools: string[] | undefined; let rootModelRestored = true;
 
@@ -284,8 +285,9 @@ export default function (pi: ExtensionAPI) {
 		state.elapsed = Date.now() - run.startTime;
 		const outcome: AgentCompletionStatus = error ? "error" : "done";
 		const queuedForDelivery = !run.stopping && run.accepted;
-		state.status = resultDeliveryStatus(outcome, queuedForDelivery && widgetCtx?.isIdle?.() === false);
+		state.status = resultDeliveryStatus(outcome, queuedForDelivery && (hostBusy || widgetCtx?.isIdle?.() === false));
 		state.pendingOutcome = state.status === "waiting" ? outcome : undefined;
+		if (state.status === "waiting") pendingDeliveries.push(state);
 		state.sessionFile = run.sessionFile;
 		const output = run.output.toString();
 		state.lastWork = error?.message ?? run.text.lastLine;
@@ -593,10 +595,12 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("model_select", (_event, ctx) => { for (const state of agentStates.values()) if (state.status !== "running") state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); updateWidget(); });
 	pi.on("agent_start", (_event, ctx) => {
-		const waiting = [...agentStates.values()].find(state => state.status === "waiting");
-		if (waiting) {
-			waiting.status = waiting.pendingOutcome ?? "done";
-			waiting.pendingOutcome = undefined;
+		hostBusy = true;
+		// Pi starts one low-level run for each follow-up in one-at-a-time mode. Match
+		// the queued result by completion order, not Map iteration order.
+		const delivered = pendingDeliveries.shift();
+		if (delivered) {
+			restoreNextWaitingAgent([delivered]);
 			updateWidget();
 			syncStatus(ctx);
 		}
@@ -607,7 +611,20 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_end", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("tool_execution_start", (event, ctx) => { if (rootAgent) { rootAgent.toolCount++; rootAgent.task = `Using ${event.toolName}`; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("tool_execution_end", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
-	pi.on("agent_settled", (_event, ctx) => { if (!rootAgent) return; clearInterval(rootAgent.timer); rootAgent.elapsed = rootStartTime ? Date.now() - rootStartTime : rootAgent.elapsed; rootAgent.status = "done"; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); });
+	pi.on("agent_settled", (_event, ctx) => {
+		// isIdle is guaranteed here unless another run was started by an extension.
+		// In that case retain returning cards until that run settles rather than clearing early.
+		if (!ctx.isIdle()) return;
+		hostBusy = false;
+		pendingDeliveries.length = 0;
+		restoreWaitingAgents([...agentStates.values()]);
+		if (rootAgent) {
+			clearInterval(rootAgent.timer); rootAgent.elapsed = rootStartTime ? Date.now() - rootStartTime : rootAgent.elapsed;
+			rootAgent.status = "done"; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens;
+		}
+		updateWidget();
+		syncStatus(ctx);
+	});
 	pi.on("session_shutdown", () => { for (const state of agentStates.values()) { clearInterval(state.timer); state.timer = undefined; if (state.activeRun) terminateRun(state.activeRun); } });
 	pi.on("session_start", async (_event, ctx) => {
 		if (!agentAutocompleteInstalled) {
@@ -623,7 +640,7 @@ export default function (pi: ExtensionAPI) {
 			}));
 			agentAutocompleteInstalled = true;
 		}
-		widgetCtx = ctx; parentSessionId = ctx.sessionManager.getSessionId(); viewedAgent = undefined; hostTools = undefined; rootModelRestored = true; loadAgents(ctx.cwd);
+		widgetCtx = ctx; parentSessionId = ctx.sessionManager.getSessionId(); viewedAgent = undefined; hostTools = undefined; rootModelRestored = true; hostBusy = !ctx.isIdle(); pendingDeliveries.length = 0; loadAgents(ctx.cwd);
 		agentModelOverrides.clear(); const overrides = (ctx.sessionManager.getEntries() as any[]).filter(entry => entry.type === "custom" && entry.customType === "agent-team-model-overrides").pop()?.data as { overrides?: Record<string, string> } | undefined; for (const [name, model] of Object.entries(overrides?.overrides ?? {})) agentModelOverrides.set(name, model);
 		restoreTeam(ctx);
 		for (const state of agentStates.values()) state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx);

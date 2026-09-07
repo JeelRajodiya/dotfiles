@@ -43,6 +43,22 @@ export function resultDeliveryStatus(
 	return queuedForDelivery ? "waiting" : outcome;
 }
 
+type WaitingAgent = { status: string; pendingOutcome?: AgentCompletionStatus };
+
+/** Restore exactly one native follow-up delivery, preserving its saved outcome. */
+export function restoreNextWaitingAgent<T extends WaitingAgent>(agents: readonly T[]): T | undefined {
+	const agent = agents.find(candidate => candidate.status === "waiting");
+	if (!agent) return undefined;
+	agent.status = agent.pendingOutcome ?? "done";
+	agent.pendingOutcome = undefined;
+	return agent;
+}
+
+/** A settled host has no queued follow-ups, so no card may remain returning. */
+export function restoreWaitingAgents<T extends WaitingAgent>(agents: readonly T[]): void {
+	while (restoreNextWaitingAgent(agents)) {}
+}
+
 export function tokenCountsFromUsage(usage: unknown): TokenCounts | undefined {
 	if (!usage || typeof usage !== "object") return undefined;
 	const values = usage as Record<string, unknown>;
