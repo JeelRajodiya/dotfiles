@@ -22,15 +22,18 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Text, type AutocompleteItem, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { spawn } from "child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { randomUUID } from "crypto";
 import { readdirSync, readFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join, resolve } from "path";
 import {
+	AgentRpcTransport,
 	contextTokensFromUsage,
 	hasRunningAgent,
 	latestAssistantContextTokens,
+	shouldFinalizeAgentEvent,
+	terminateChild,
 } from "./agent-team-helpers";
 
 // ── Types ────────────────────────────────────────
@@ -44,23 +47,31 @@ interface AgentDef {
 	file: string;
 }
 
-interface QueuedTask {
-	task: string;
-	model: string;
+interface ActiveAgentRun {
+	child: ChildProcessWithoutNullStreams;
+	transport: AgentRpcTransport;
+	textChunks: string[];
+	initialTask: string;
+	sessionFile: string;
+	startTime: number;
+	accepted: boolean;
+	finished: boolean;
+	stopping: boolean;
 }
 
 interface AgentState {
 	def: AgentDef;
 	status: "idle" | "running" | "done" | "error";
 	task: string;
-	queue: QueuedTask[];
 	toolCount: number;
 	elapsed: number;
 	lastWork: string;
 	contextTokens?: number;
+	contextWindow: number;
 	sessionFile: string | null;
 	runCount: number;
 	timer?: ReturnType<typeof setInterval>;
+	activeRun?: ActiveAgentRun;
 }
 
 // ── Display Name Helper ──────────────────────────
@@ -162,7 +173,6 @@ export default function (pi: ExtensionAPI) {
 	let gridCols = 2;
 	let widgetCtx: any;
 	let sessionDir = "";
-	let contextWindow = 0;
 	let directAgent: AgentDef | undefined;
 	let normalMode = false;
 	let defaultTools: string[] = [];
@@ -176,6 +186,13 @@ export default function (pi: ExtensionAPI) {
 
 	function effectiveAgentModel(def: AgentDef, ctx: any): string {
 		return agentModelOverrides.get(def.name.toLowerCase()) ?? def.model ?? parentModel(ctx);
+	}
+
+	function modelContextWindow(model: string, ctx: any): number {
+		const slash = model.indexOf("/");
+		return slash > 0
+			? ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))?.contextWindow ?? 0
+			: 0;
 	}
 
 	function modelSetting(def: AgentDef, ctx: any): string {
@@ -201,6 +218,11 @@ export default function (pi: ExtensionAPI) {
 			throw new Error(`Unknown model "${model}"`);
 		}
 		pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) });
+		const state = agentStates.get(def.name.toLowerCase());
+		if (state && state.status !== "running") {
+			state.contextWindow = modelContextWindow(effectiveAgentModel(def, ctx), ctx);
+			updateWidget();
+		}
 		return modelSetting(def, ctx);
 	}
 
@@ -247,18 +269,17 @@ export default function (pi: ExtensionAPI) {
 					if (!agentStates.has(def.name.toLowerCase())) {
 						agentStates.set(def.name.toLowerCase(), createState(def));
 					}
-					const queued = enqueueAgent(def.name, task, ctx);
-					if (!queued.ok) {
-						ctx.ui.notify(queued.message, "error");
-						return;
+					try {
+						const submitted = await submitAgent(def.name, task, ctx);
+						ctx.ui.notify(
+							submitted.status === "steered"
+								? `${displayName(def.name)} steering accepted`
+								: `${displayName(def.name)} started in the background`,
+							"info",
+						);
+					} catch (error) {
+						ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 					}
-					updateWidget();
-					ctx.ui.notify(
-						queued.status === "running"
-							? `${displayName(def.name)} started in the background`
-							: `${displayName(def.name)} queued at position ${queued.position}`,
-						"info",
-					);
 				},
 			});
 		}
@@ -290,11 +311,11 @@ export default function (pi: ExtensionAPI) {
 			def,
 			status: "idle",
 			task: "",
-			queue: [],
 			toolCount: 0,
 			elapsed: 0,
 			lastWork: "",
 			contextTokens: latestAssistantContextTokens(file),
+			contextWindow: modelContextWindow(effectiveAgentModel(def, widgetCtx), widgetCtx),
 			sessionFile: existsSync(file) ? file : null,
 			runCount: 0,
 		};
@@ -334,14 +355,13 @@ export default function (pi: ExtensionAPI) {
 		const nameVisible = Math.min(name.length, w);
 
 		const statusStr = `${statusIcon} ${state.status}`;
-		const queueStr = state.queue.length > 0 ? ` +${state.queue.length} queued` : "";
-		const timeStr = state.status !== "idle" ? ` ${Math.round(state.elapsed / 1000)}s${queueStr}` : queueStr;
+		const timeStr = state.status !== "idle" ? ` ${Math.round(state.elapsed / 1000)}s` : "";
 		const statusLine = theme.fg(statusColor, statusStr + timeStr);
 		const statusVisible = statusStr.length + timeStr.length;
 
 		const formatTokens = (tokens: number) => tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : `${Math.round(tokens)}`;
 		const ctxStr = `${state.contextTokens === undefined ? "?" : formatTokens(state.contextTokens)}/${
-			contextWindow > 0 ? formatTokens(contextWindow) : "?"
+			state.contextWindow > 0 ? formatTokens(state.contextWindow) : "?"
 		}`;
 		const ctxLine = theme.fg("dim", ctxStr);
 		const ctxVisible = ctxStr.length;
@@ -417,38 +437,55 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// ── Dispatch Agent (returns Promise) ─────────
+	// ── Dispatch Agent ───────────────────────────
 
-	function dispatchAgent(
-		agentName: string,
-		task: string,
-		model: string,
-	): Promise<{ output: string; exitCode: number; elapsed: number }> {
-		const key = agentName.toLowerCase();
-		const state = agentStates.get(key);
-		if (!state) {
-			return Promise.resolve({
-				output: `Agent "${agentName}" not found. Available: ${Array.from(agentStates.values()).map(s => displayName(s.def.name)).join(", ")}`,
-				exitCode: 1,
-				elapsed: 0,
-			});
+	function terminateRun(run: ActiveAgentRun): void {
+		run.stopping = true;
+		run.transport.fail(new Error("Agent process stopped"));
+		terminateChild(run.child);
+	}
+
+	function finishRun(state: AgentState, run: ActiveAgentRun, error?: Error): void {
+		if (run.finished || state.activeRun !== run) return;
+		run.finished = true;
+		clearInterval(state.timer);
+		state.elapsed = Date.now() - run.startTime;
+		state.status = error ? "error" : "done";
+		if (!error) state.sessionFile = run.sessionFile;
+		const full = run.textChunks.join("");
+		state.lastWork = error?.message ?? full.split("\n").filter(line => line.trim()).pop() ?? "";
+		state.activeRun = undefined;
+		updateWidget();
+
+		if (!run.stopping && run.accepted) {
+			const output = full.length > 8000 ? `${full.slice(0, 8000)}\n\n... [truncated]` : full;
+			const result = { output: error ? error.message : output, exitCode: error ? 1 : 0, elapsed: state.elapsed };
+			try {
+				pi.sendMessage({
+					customType: "agent-team-result",
+					content: `[${displayName(state.def.name)}] ${error ? "failed" : "completed"} in ${Math.round(state.elapsed / 1000)}s\nTask: ${run.initialTask}\n\n${result.output || "(no output)"}`,
+					display: true,
+					details: { agent: state.def.name, task: run.initialTask, result },
+				}, { deliverAs: "followUp", triggerTurn: true });
+				widgetCtx?.ui.notify(
+					`${displayName(state.def.name)} ${state.status} in ${Math.round(state.elapsed / 1000)}s`,
+					error ? "error" : "success",
+				);
+			} catch {
+				widgetCtx = undefined;
+			}
 		}
+		terminateRun(run);
+	}
 
-		if (state.status === "running") {
-			return Promise.resolve({
-				output: `Agent "${displayName(state.def.name)}" is already running. Wait for it to finish.`,
-				exitCode: 1,
-				elapsed: 0,
-			});
-		}
-
+	function startAgent(state: AgentState, task: string, model: string, ctx: any): ActiveAgentRun {
 		state.status = "running";
+		state.contextWindow = modelContextWindow(model, ctx);
 		state.task = task;
 		state.toolCount = 0;
 		state.elapsed = 0;
 		state.lastWork = "";
 		state.runCount++;
-		updateWidget();
 
 		const startTime = Date.now();
 		state.timer = setInterval(() => {
@@ -456,14 +493,10 @@ export default function (pi: ExtensionAPI) {
 			updateWidget();
 		}, 1000);
 
-		// Session file for this agent
 		const agentKey = state.def.name.toLowerCase().replace(/\s+/g, "-");
 		const agentSessionFile = join(sessionDir, `${agentKey}.json`);
-
-		// Build args — first run creates session, subsequent runs resume
 		const args = [
-			"--mode", "json",
-			"-p",
+			"--mode", "rpc",
 			"--no-extensions",
 			"--extension", join(homedir(), ".pi", "agent", "extensions", "openai-codex-fast.ts"),
 			"--extension", join(homedir(), ".pi", "agent", "extensions", "ponytail.ts"),
@@ -473,159 +506,113 @@ export default function (pi: ExtensionAPI) {
 			"--append-system-prompt", state.def.systemPrompt,
 			"--session", agentSessionFile,
 		];
+		if (state.sessionFile) args.push("-c");
 
-		// Continue existing session if we have one
-		if (state.sessionFile) {
-			args.push("-c");
-		}
+		const child = spawn("pi", args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } });
+		const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
+		const run: ActiveAgentRun = {
+			child,
+			transport,
+			textChunks: [],
+			initialTask: task,
+			sessionFile: agentSessionFile,
+			startTime,
+			accepted: false,
+			finished: false,
+			stopping: false,
+		};
+		state.activeRun = run;
+		updateWidget();
 
-		args.push(task);
-
-		const textChunks: string[] = [];
-
-		return new Promise((resolve) => {
-			const proc = spawn("pi", args, {
-				stdio: ["ignore", "pipe", "pipe"],
-				env: { ...process.env },
-			});
-
-			let buffer = "";
-
-			proc.stdout!.setEncoding("utf-8");
-			proc.stdout!.on("data", (chunk: string) => {
-				buffer += chunk;
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-				for (const line of lines) {
-					if (!line.trim()) continue;
-					try {
-						const event = JSON.parse(line);
-						if (event.type === "message_update") {
-							const delta = event.assistantMessageEvent;
-							if (delta?.type === "text_delta") {
-								textChunks.push(delta.delta || "");
-								const full = textChunks.join("");
-								const last = full.split("\n").filter((l: string) => l.trim()).pop() || "";
-								state.lastWork = last;
-								updateWidget();
-							}
-						} else if (event.type === "tool_execution_start") {
-							state.toolCount++;
-							updateWidget();
-						} else if (event.type === "message_end") {
-							const tokens = contextTokensFromUsage(event.message?.usage);
-							if (tokens !== undefined) {
-								state.contextTokens = tokens;
-								updateWidget();
-							}
-						} else if (event.type === "agent_end") {
-							const last = [...(event.messages || [])]
-								.reverse()
-								.find((message: any) =>
-									message.role === "assistant" && contextTokensFromUsage(message.usage) !== undefined
-								);
-							const tokens = contextTokensFromUsage(last?.usage);
-							if (tokens !== undefined) {
-								state.contextTokens = tokens;
-								updateWidget();
-							}
-						}
-					} catch {}
+		let buffer = "";
+		const handleEvent = (event: any) => {
+			if (transport.handle(event)) return;
+			if (event.type === "message_update") {
+				const delta = event.assistantMessageEvent;
+				if (delta?.type === "text_delta") {
+					run.textChunks.push(delta.delta || "");
+					const full = run.textChunks.join("");
+					state.lastWork = full.split("\n").filter((line: string) => line.trim()).pop() || "";
+					updateWidget();
 				}
-			});
-
-			proc.stderr!.setEncoding("utf-8");
-			proc.stderr!.on("data", () => {});
-
-			proc.on("close", (code) => {
-				if (buffer.trim()) {
-					try {
-						const event = JSON.parse(buffer);
-						if (event.type === "message_update") {
-							const delta = event.assistantMessageEvent;
-							if (delta?.type === "text_delta") textChunks.push(delta.delta || "");
-						}
-					} catch {}
-				}
-
-				clearInterval(state.timer);
-				state.elapsed = Date.now() - startTime;
-				state.status = code === 0 ? "done" : "error";
-
-				// Mark session file as available for resume
-				if (code === 0) {
-					state.sessionFile = agentSessionFile;
-				}
-
-				const full = textChunks.join("");
-				state.lastWork = full.split("\n").filter((l: string) => l.trim()).pop() || "";
+			} else if (event.type === "tool_execution_start") {
+				state.toolCount++;
 				updateWidget();
-
-				try {
-					widgetCtx?.ui.notify(
-						`${displayName(state.def.name)} ${state.status} in ${Math.round(state.elapsed / 1000)}s`,
-						state.status === "done" ? "success" : "error"
+			} else if (event.type === "message_end") {
+				const tokens = contextTokensFromUsage(event.message?.usage);
+				if (tokens !== undefined) {
+					state.contextTokens = tokens;
+					updateWidget();
+				}
+			} else if (event.type === "agent_end") {
+				const last = [...(event.messages || [])]
+					.reverse()
+					.find((message: any) =>
+						message.role === "assistant" && contextTokensFromUsage(message.usage) !== undefined
 					);
-				} catch {
-					widgetCtx = undefined;
-				}
-
-				resolve({
-					output: full,
-					exitCode: code ?? 1,
-					elapsed: state.elapsed,
-				});
-			});
-
-			proc.on("error", (err) => {
-				clearInterval(state.timer);
-				state.status = "error";
-				state.lastWork = `Error: ${err.message}`;
+				const tokens = contextTokensFromUsage(last?.usage);
+				if (tokens !== undefined) state.contextTokens = tokens;
 				updateWidget();
-				resolve({
-					output: `Error spawning agent: ${err.message}`,
-					exitCode: 1,
-					elapsed: Date.now() - startTime,
-				});
-			});
-		});
-	}
+			} else if (shouldFinalizeAgentEvent(event.type)) {
+				finishRun(state, run);
+			}
+		};
+		const handleLine = (line: string) => {
+			if (!line.trim()) return;
+			try { handleEvent(JSON.parse(line.endsWith("\r") ? line.slice(0, -1) : line)); } catch {}
+		};
 
-	function runNext(state: AgentState): void {
-		const next = state.queue.shift();
-		if (!next) return;
-
-		void dispatchAgent(state.def.name, next.task, next.model).then(result => {
-			const output = result.output.length > 8000
-				? result.output.slice(0, 8000) + "\n\n... [truncated]"
-				: result.output;
-			const status = result.exitCode === 0 ? "completed" : "failed";
-			try {
-				pi.sendMessage({
-					customType: "agent-team-result",
-					content: `[${displayName(state.def.name)}] ${status} in ${Math.round(result.elapsed / 1000)}s\nTask: ${next.task}\n\n${output || "(no output)"}`,
-					display: true,
-					details: { agent: state.def.name, task: next.task, result },
-				}, { deliverAs: "followUp", triggerTurn: true });
-			} catch {
-				// The parent session may have closed while the background agent was running.
-			} finally {
-				runNext(state);
+		child.stdout.setEncoding("utf-8");
+		child.stdout.on("data", (chunk: string) => {
+			buffer += chunk;
+			let newline;
+			while ((newline = buffer.indexOf("\n")) !== -1) {
+				handleLine(buffer.slice(0, newline));
+				buffer = buffer.slice(newline + 1);
 			}
 		});
+		child.stderr.setEncoding("utf-8");
+		child.stderr.on("data", () => {});
+		child.stdin.on("error", error => transport.fail(error));
+		child.on("error", error => {
+			transport.fail(error);
+			if (!run.stopping) finishRun(state, run, new Error(`Agent process error: ${error.message}`));
+		});
+		child.on("close", code => {
+			handleLine(buffer);
+			transport.fail(new Error(`Agent process exited with code ${code ?? 1}`));
+			if (!run.finished && !run.stopping) {
+				finishRun(state, run, new Error(`Agent process exited before settling (code ${code ?? 1})`));
+			}
+		});
+		return run;
 	}
 
-	function enqueueAgent(agentName: string, task: string, ctx: any) {
+	async function submitAgent(agentName: string, task: string, ctx: any) {
 		const state = agentStates.get(agentName.toLowerCase());
-		if (!state) return { ok: false as const, message: `Agent "${agentName}" not found` };
+		if (!state) throw new Error(`Agent "${agentName}" not found`);
 
-		const queued = state.status === "running";
-		const model = effectiveAgentModel(state.def, ctx);
-		state.queue.push({ task, model });
-		const position = state.queue.length;
-		if (!queued) runNext(state);
-		updateWidget();
-		return { ok: true as const, status: queued ? "queued" : "running", position };
+		if (state.status === "running") {
+			const run = state.activeRun;
+			if (!run || run.finished || run.stopping) throw new Error(`Agent "${displayName(state.def.name)}" has no active steering transport`);
+			try {
+				await run.transport.request({ type: "prompt", message: task, streamingBehavior: "steer" });
+			} catch (error) {
+				throw new Error(`Unable to steer ${displayName(state.def.name)}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return { status: "steered" as const };
+		}
+
+		const run = startAgent(state, task, effectiveAgentModel(state.def, ctx), ctx);
+		try {
+			await run.transport.request({ type: "prompt", message: task });
+			run.accepted = true;
+			return { status: "running" as const };
+		} catch (error) {
+			const failure = new Error(`Unable to start ${displayName(state.def.name)}: ${error instanceof Error ? error.message : String(error)}`);
+			finishRun(state, run, failure);
+			throw failure;
+		}
 	}
 
 	// ── dispatch_agent Tool (registered at top level) ──
@@ -633,7 +620,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "dispatch_agent",
 		label: "Dispatch Agent",
-		description: "Queue a background task for a specialist agent and return immediately. Different agents run concurrently; tasks for the same agent run in order. Results are posted back to the main chat.",
+		description: "Start a specialist agent in the background, or steer that agent when it is already running. Different agents run concurrently. Results are posted back to the main chat.",
 		parameters: Type.Object({
 			agent: Type.String({ description: "Agent name (case-insensitive)" }),
 			task: Type.String({ description: "Task description for the agent to execute" }),
@@ -641,15 +628,13 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const { agent, task } = params as { agent: string; task: string };
-			const queued = enqueueAgent(agent, task, ctx);
-			if (!queued.ok) throw new Error(queued.message);
-
-			const message = queued.status === "running"
-				? `${displayName(agent)} started in the background.`
-				: `${displayName(agent)} queued at position ${queued.position}.`;
+			const submitted = await submitAgent(agent, task, ctx);
+			const message = submitted.status === "steered"
+				? `${displayName(agent)} steering accepted.`
+				: `${displayName(agent)} started in the background. The result will be posted to this chat.`;
 			return {
-				content: [{ type: "text", text: `${message} The result will be posted to this chat.` }],
-				details: { agent, task, status: queued.status, position: queued.position },
+				content: [{ type: "text", text: message }],
+				details: { agent, task, status: submitted.status },
 			};
 		},
 
@@ -682,8 +667,8 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 
-			if (details.status === "running" || details.status === "queued") {
-				const suffix = details.status === "queued" ? ` #${details.position}` : " background";
+			if (details.status === "running" || details.status === "steered") {
+				const suffix = details.status === "steered" ? " steering accepted" : " background";
 				return new Text(theme.fg("accent", `● ${details.agent}`) + theme.fg("dim", suffix), 0, 0);
 			}
 
@@ -971,9 +956,21 @@ ${agentCatalog}`,
 
 	// ── Session Start ────────────────────────────
 
-	pi.on("model_select", (event) => {
-		contextWindow = event.model.contextWindow || 0;
+	pi.on("model_select", (_event, ctx) => {
+		for (const state of agentStates.values()) {
+			if (state.status !== "running") {
+				state.contextWindow = modelContextWindow(effectiveAgentModel(state.def, ctx), ctx);
+			}
+		}
 		updateWidget();
+	});
+
+	pi.on("session_shutdown", () => {
+		for (const state of agentStates.values()) {
+			if (!state.activeRun) continue;
+			clearInterval(state.timer);
+			terminateRun(state.activeRun);
+		}
 	});
 
 	pi.on("session_start", async (_event, _ctx) => {
@@ -982,7 +979,6 @@ ${agentCatalog}`,
 			widgetCtx.ui.setWidget("agent-team", undefined);
 		}
 		widgetCtx = _ctx;
-		contextWindow = _ctx.model?.contextWindow || 0;
 		defaultTools = pi.getActiveTools().filter(tool => !TEAM_TOOLS.includes(tool));
 		loadAgents(_ctx.cwd);
 		agentModelOverrides.clear();
