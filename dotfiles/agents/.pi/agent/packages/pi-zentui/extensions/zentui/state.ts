@@ -5,6 +5,7 @@ import {
 	buildCacheWriteLabel,
 	buildContextLabel,
 	buildCostLabel,
+	buildTokenCountLabel,
 	buildTokenLabel,
 	formatProviderLabel,
 	getUsageTotals,
@@ -21,6 +22,7 @@ export type FooterState = GitStatusSummary & {
 	fast?: boolean;
 	providerLabel: string;
 	contextLabel: string;
+	contextTokenLabel: string;
 	tokenLabel: string;
 	cacheReadLabel: string;
 	cacheWriteLabel: string;
@@ -39,6 +41,7 @@ export function createInitialState(gitDefaults: GitStatusSummary): FooterState {
 		modelName: "",
 		providerLabel: "Unknown",
 		contextLabel: "--",
+		contextTokenLabel: "↑0 ↓0",
 		tokenLabel: "↑0 ↓0",
 		cacheReadLabel: "",
 		cacheWriteLabel: "",
@@ -92,6 +95,7 @@ export function syncState(
 	state.modelLabel = modelLabelFor(state, "id");
 	state.providerLabel = formatProviderLabel(ctx.model?.provider);
 	state.contextLabel = buildContextLabel(ctx);
+	state.contextTokenLabel = buildTokenCountLabel(totals);
 	state.tokenLabel = buildTokenLabel(totals, cacheHitIcon);
 	state.cacheReadLabel = buildCacheReadLabel(totals.cacheRead);
 	state.cacheWriteLabel = buildCacheWriteLabel(totals.cacheWrite);

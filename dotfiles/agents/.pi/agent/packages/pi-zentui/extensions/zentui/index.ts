@@ -60,7 +60,7 @@ import {
 } from "./editor-transfer";
 import { installFooter, installHiddenFooter } from "./footer";
 import { collectFooterFormatReferences, parseFooterFormat } from "./footer-format";
-import { buildSessionDurationLabel, invalidateUsageTotalsCache } from "./format";
+import { buildSessionDurationLabel, buildTokenCountLabel, getUsageTotals, invalidateUsageTotalsCache } from "./format";
 import { emptyGitStatus, readGitStatus } from "./git";
 import {
 	InteractionMetricsTracker,
@@ -80,6 +80,7 @@ import { applyProjectRefreshToState } from "./project-state";
 import { readRuntimeInfo } from "./runtime";
 import { installSelectorBorderStyle, removeSelectorBorderStyle } from "./selector-border";
 import { SessionLifecycle } from "./session-lifecycle";
+import { installThinkingTimer } from "./thinking-timer";
 import { registerZentuiSettingsCommand } from "./settings-command";
 import { createInitialState, type FooterState, modelLabelFor, syncState } from "./state";
 import { resolveFooterTelemetry } from "./telemetry";
@@ -233,6 +234,13 @@ export default function (pi: ExtensionAPI) {
 	let activeTuiContext: ExtensionContext | undefined;
 	let cleanupAccentRailLayoutPatch: () => void = () => {};
 	let accentRailLayoutPatchInstallSerial = 0;
+	let cleanupThinkingTimer: () => void = () => {};
+	let hostTokenBase = { input: 0, output: 0 };
+	try {
+		cleanupThinkingTimer = installThinkingTimer();
+	} catch {
+		// Pi versions without AssistantMessageComponent.updateContent keep the native label.
+	}
 
 	const recordAccentRailLayoutPatchDiagnostic = (
 		diagnostic: AccentRailLayoutPatchDiagnostic,
@@ -713,6 +721,7 @@ export default function (pi: ExtensionAPI) {
 						contextPercent: getContextPercent(ctx),
 						contextTokens: getContextTokens(ctx),
 						contextWindow: getContextWindow(ctx),
+						contextTokenLabel: state.contextTokenLabel,
 						sessionName: ctx.sessionManager.getSessionName() ?? "",
 						agentDurationMs: getAgentDurationMs(),
 						agentActive: agentRunActive,
@@ -760,6 +769,7 @@ export default function (pi: ExtensionAPI) {
 						contextPercent: getContextPercent(ctx),
 						contextTokens: getContextTokens(ctx),
 						contextWindow: getContextWindow(ctx),
+						contextTokenLabel: state.contextTokenLabel,
 						sessionName: ctx.sessionManager.getSessionName() ?? "",
 						agentDurationMs: getAgentDurationMs(),
 						agentActive: agentRunActive,
@@ -1325,6 +1335,7 @@ export default function (pi: ExtensionAPI) {
 		liveContext.clear();
 		interactionMetrics.shutdown();
 		workingLine.dispose(ctx);
+		cleanupThinkingTimer();
 		cleanupUi(ctx);
 	});
 
@@ -1335,6 +1346,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_start", (event, ctx) => {
 		liveContext.clear();
+		const totals = getUsageTotals(ctx); hostTokenBase = { input: totals.input, output: totals.output };
 		const { interactionStarted } = interactionMetrics.agentStart();
 		startAgentTurn(interactionStarted);
 		workingLine.startAgent(ctx);
@@ -1368,6 +1380,13 @@ export default function (pi: ExtensionAPI) {
 		);
 		if (metrics.usageChanged || metrics.thoughtChanged) {
 			workingLine.updateMetrics(metrics.displayTokens, interactionMetrics.currentThought(), ctx);
+		}
+		if (metrics.usageChanged && metrics.displayTokens) {
+			state.contextTokenLabel = buildTokenCountLabel({
+				input: hostTokenBase.input + metrics.displayTokens.input,
+				output: hostTokenBase.output + metrics.displayTokens.output,
+			});
+			refresh();
 		}
 	});
 	pi.on("message_end", (event, ctx) => {

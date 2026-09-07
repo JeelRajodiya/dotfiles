@@ -3,7 +3,8 @@ export const ZENTUI_PROTOTYPE_PATCH_REGISTRY = Symbol.for("pi-zentui.prototype-p
 type PrototypePatchAdapter =
 	| "user-message-render"
 	| "user-message-invalidate"
-	| "selector-border-render";
+	| "selector-border-render"
+	| "assistant-message-update-content";
 
 type PrototypeMethod = (this: unknown, ...args: unknown[]) => unknown;
 
@@ -21,7 +22,7 @@ type Registration = {
 };
 
 type PatchRecord = {
-	method: "render" | "invalidate";
+	method: "render" | "invalidate" | "updateContent";
 	predecessor: PrototypeMethod;
 	predecessorDescriptor?: PropertyDescriptor;
 	wrapper: PrototypeMethod;
@@ -101,7 +102,7 @@ function createCleanup(
 
 export function installPrototypePatch(
 	targetValue: object,
-	method: "render" | "invalidate",
+	method: "render" | "invalidate" | "updateContent",
 	adapter: PrototypePatchAdapter,
 	behavior: PatchBehavior,
 ): () => void {
@@ -151,7 +152,7 @@ export function installPrototypePatch(
 
 export function removePrototypePatch(
 	targetValue: object,
-	method: "render" | "invalidate",
+	method: "render" | "invalidate" | "updateContent",
 	adapter: PrototypePatchAdapter,
 ): void {
 	const target = targetValue as PatchTarget;

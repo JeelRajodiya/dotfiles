@@ -50,6 +50,7 @@ export type MinimalistEditorMetadata = {
 	contextPercent?: number;
 	contextTokens?: number;
 	contextWindow?: number;
+	contextTokenLabel?: string;
 	sessionName?: string;
 	agentDurationMs?: number;
 	agentActive?: boolean;
@@ -230,6 +231,8 @@ function renderTopRight(
 			}
 		}
 		parts.push(context);
+		const tokens = sanitizeEditorMetadataText(metadata.contextTokenLabel ?? "");
+		if (tokens) parts.push(renderStyleForSource(uiTheme, source, "dim", tokens));
 	}
 	return joinParts(parts);
 }

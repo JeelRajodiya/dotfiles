@@ -324,10 +324,12 @@ export function buildCacheWriteLabel(cacheWrite: number): string {
 	return cacheWrite > 0 ? `W${formatCount(cacheWrite)}` : "";
 }
 
+export function buildTokenCountLabel(totals: Pick<UsageTotals, "input" | "output">): string {
+	return `↑${formatCount(totals.input)} ↓${formatCount(totals.output)}`;
+}
+
 export function buildTokenLabel(totals: UsageTotals, cacheHitIcon = "󰆼"): string {
-	const parts: string[] = [];
-	if (totals.input) parts.push(`↑${formatCount(totals.input)}`);
-	if (totals.output) parts.push(`↓${formatCount(totals.output)}`);
+	const parts: string[] = [buildTokenCountLabel(totals)];
 
 	const hasCacheTokens = totals.cacheRead > 0 || totals.cacheWrite > 0;
 	if (hasCacheTokens && totals.latestCacheHitRate !== undefined) {
