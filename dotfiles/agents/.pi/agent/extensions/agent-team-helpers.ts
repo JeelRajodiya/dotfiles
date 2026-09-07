@@ -12,6 +12,38 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  */
 export default function (_pi: ExtensionAPI): void {}
 
+export function rootTools(hostTools: string[], teamTools: string[]): string[] {
+	return [...new Set([...hostTools, ...teamTools])];
+}
+
+export type TokenCounts = { input: number; output: number };
+export type AgentCompletionStatus = "done" | "error";
+
+/** Keep a completed child visible until Pi starts its native follow-up delivery turn. */
+export function resultDeliveryStatus(
+	outcome: AgentCompletionStatus,
+	queuedForDelivery: boolean,
+): AgentCompletionStatus | "waiting" {
+	return queuedForDelivery ? "waiting" : outcome;
+}
+
+export function tokenCountsFromUsage(usage: unknown): TokenCounts | undefined {
+	if (!usage || typeof usage !== "object") return undefined;
+	const values = usage as Record<string, unknown>;
+	const input = values.input; const output = values.output;
+	if (typeof input !== "number" || !Number.isFinite(input) || typeof output !== "number" || !Number.isFinite(output)) return undefined;
+	return { input: Math.max(0, input), output: Math.max(0, output) };
+}
+
+export function addTokenCounts(total: TokenCounts, next: TokenCounts | undefined): TokenCounts {
+	return next ? { input: total.input + next.input, output: total.output + next.output } : total;
+}
+
+export function formatAgentTokens(tokens: TokenCounts): string {
+	const format = (value: number) => value >= 1000 ? `${Math.round(value / 1000)}k` : `${Math.round(value)}`;
+	return `↑${format(tokens.input)} ↓${format(tokens.output)}`;
+}
+
 export function contextTokensFromUsage(usage: unknown): number | undefined {
 	if (!usage || typeof usage !== "object") return undefined;
 	const values = usage as Record<string, unknown>;
@@ -36,6 +68,21 @@ export function latestAssistantContextTokens(sessionFile: string): number | unde
 		} catch {}
 	}
 	return latest;
+}
+
+export function sessionTokenCounts(sessionFile: string): TokenCounts {
+	if (!existsSync(sessionFile)) return { input: 0, output: 0 };
+	let total: TokenCounts = { input: 0, output: 0 };
+	for (const line of readFileSync(sessionFile, "utf-8").split("\n")) {
+		try {
+			const entry = JSON.parse(line);
+			const usage = entry?.type === "message" && (entry.message?.role === "assistant" || entry.message?.role === "toolResult")
+				? entry.message.usage
+				: entry?.type === "compaction" || entry?.type === "branch_summary" ? entry.usage : undefined;
+			total = addTokenCounts(total, tokenCountsFromUsage(usage));
+		} catch {}
+	}
+	return total;
 }
 
 const cleanActivityText = (value: unknown) => String(value ?? "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim();

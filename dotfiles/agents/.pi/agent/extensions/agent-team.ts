@@ -7,12 +7,12 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
-	AgentRpcTransport, childSessionPath, contextTokensFromUsage, encodeCwd,
-	formatToolActivity, latestAssistantContextTokens, latestChildActivity, pruneSessionDirs, shouldFinalizeAgentEvent, terminateChild,
+	addTokenCounts, AgentRpcTransport, childSessionPath, contextTokensFromUsage, encodeCwd,
+	formatToolActivity, latestAssistantContextTokens, latestChildActivity, pruneSessionDirs, resultDeliveryStatus, rootTools, sessionTokenCounts, shouldFinalizeAgentEvent, terminateChild, type AgentCompletionStatus, type TokenCounts,
 } from "./agent-team-helpers";
 import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity";
 import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs";
-import { FRAME_MS, renderDetail, renderEmpty, renderGrid } from "./lib/agent-render";
+import { FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } from "./lib/agent-render";
 
 interface ActiveAgentRun {
 	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; text: TextTail; stderrChunks: string[]; initialTask: string;
@@ -20,8 +20,8 @@ interface ActiveAgentRun {
 	output: OutputBuffer; toolStarts: Map<string, { summary: string; startTime: number }>;
 }
 interface AgentState {
-	name: string; def: AgentDef; goal: string; status: "idle" | "running" | "done" | "error"; task: string;
-	toolCount: number; elapsed: number; lastWork: string; activity: ActivityLog; contextTokens: number; contextWindow: number;
+	name: string; def: AgentDef; goal: string; status: AgentStatus; pendingOutcome?: AgentCompletionStatus; task: string;
+	toolCount: number; elapsed: number; lastWork: string; activity: ActivityLog; contextTokens: number; contextWindow: number; tokens: TokenCounts;
 	sessionFile: string | null; runCount: number; autoName: boolean; sessionKey: string; timer?: ReturnType<typeof setInterval>; activeRun?: ActiveAgentRun;
 }
 type SavedInstance = { name: string; type: string; goal: string; autoName?: boolean; sessionKey?: string };
@@ -99,7 +99,7 @@ export default function (pi: ExtensionAPI) {
 		const sessionKey = rawSessionKey.toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "agent";
 		const provisional = { name, def, sessionKey } as AgentState; const file = sessionPath(provisional);
 		return { name, def, goal, status: "idle", task: "", toolCount: 0, elapsed: 0, lastWork: "", activity: ActivityLog.parse(latestChildActivity(file)),
-			contextTokens: latestAssistantContextTokens(file) ?? 0, contextWindow: modelWindow(def.model ?? parentModel(widgetCtx), widgetCtx),
+			contextTokens: latestAssistantContextTokens(file) ?? 0, contextWindow: modelWindow(def.model ?? parentModel(widgetCtx), widgetCtx), tokens: sessionTokenCounts(file),
 			sessionFile: existsSync(file) ? file : null, runCount: 0, autoName, sessionKey };
 	}
 	function persistTeam() {
@@ -130,14 +130,13 @@ export default function (pi: ExtensionAPI) {
 		if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true });
 		pruneSessionDirs(sessionDir, MAX_KEPT_SESSIONS); allAgentDefs = scanAgentDirs(cwd, getAgentDir()); teams = scanTeams(cwd, getAgentDir());
 	}
-	function rootTools(state: AgentState): string[] { return [...new Set([...state.def.tools.split(",").map(tool => tool.trim()).filter(Boolean), ...TEAM_TOOLS])]; }
 	/**
 	 * Narrow the host's tools to match the current mode, and restore them when there is no mode.
 	 * setActiveTools replaces the whole tool list, so with no root and no instances the host must
 	 * keep everything it started with — otherwise a plain session is left with dispatch_agent alone.
 	 */
 	function applyActiveTools() {
-		const restricted = rootAgent ? rootTools(rootAgent) : agentStates.size ? TEAM_TOOLS : undefined;
+		const restricted = rootAgent ? rootTools(hostTools ?? pi.getActiveTools(), TEAM_TOOLS) : agentStates.size ? TEAM_TOOLS : undefined;
 		if (restricted) {
 			// ??= not .length: a host started with --no-tools has a legitimately empty toolset, and
 			// treating that as "not captured yet" would hand it the team tools back on demote.
@@ -264,12 +263,25 @@ export default function (pi: ExtensionAPI) {
 
 	function terminateRun(run: ActiveAgentRun) { run.stopping = true; run.transport.fail(new Error("Agent process stopped")); terminateChild(run.child); }
 	function finishRun(state: AgentState, run: ActiveAgentRun, error?: Error) {
-		if (run.finished || state.activeRun !== run) return; run.finished = true; clearInterval(state.timer); state.timer = undefined; state.elapsed = Date.now() - run.startTime; state.status = error ? "error" : "done"; state.sessionFile = run.sessionFile;
-		const output = run.output.toString(); state.lastWork = error?.message ?? run.text.lastLine; state.activeRun = undefined; updateWidget(); syncStatus();
-		if (!run.stopping && run.accepted) {
+		if (run.finished || state.activeRun !== run) return;
+		run.finished = true;
+		clearInterval(state.timer);
+		state.timer = undefined;
+		state.elapsed = Date.now() - run.startTime;
+		const outcome: AgentCompletionStatus = error ? "error" : "done";
+		const queuedForDelivery = !run.stopping && run.accepted;
+		state.status = resultDeliveryStatus(outcome, queuedForDelivery && widgetCtx?.isIdle?.() === false);
+		state.pendingOutcome = state.status === "waiting" ? outcome : undefined;
+		state.sessionFile = run.sessionFile;
+		const output = run.output.toString();
+		state.lastWork = error?.message ?? run.text.lastLine;
+		state.activeRun = undefined;
+		updateWidget();
+		syncStatus();
+		if (queuedForDelivery) {
 			const result = error ? error.message : output || "(no output)";
-			pi.sendMessage({ customType: "agent-team-result", content: `Private result from ${state.name} (${state.def.name}) for ${run.initialTask}:\n${result}`, display: false, details: { agent: state.name, status: state.status, elapsed: state.elapsed } }, { deliverAs: "followUp", triggerTurn: true });
-			widgetCtx?.ui.notify(`${displayName(state.name)} ${state.status} in ${Math.round(state.elapsed / 1000)}s`, error ? "error" : "success");
+			pi.sendMessage({ customType: "agent-team-result", content: `Private result from ${state.name} (${state.def.name}) for ${run.initialTask}:\n${result}`, display: false, details: { agent: state.name, status: outcome, elapsed: state.elapsed } }, { deliverAs: "followUp", triggerTurn: true });
+			widgetCtx?.ui.notify(`${displayName(state.name)} ${state.status === "waiting" ? `is returning its ${outcome} result` : outcome} in ${Math.round(state.elapsed / 1000)}s`, error ? "error" : "success");
 		}
 		terminateRun(run);
 	}
@@ -292,7 +304,7 @@ export default function (pi: ExtensionAPI) {
 		const child = spawn(process.env.PI_BIN || "pi", args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } }); const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
 		const run: ActiveAgentRun = { child, transport, text: new TextTail(), stderrChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, output: new OutputBuffer(), toolStarts: new Map() }; state.activeRun = run; updateWidget();
 		let buffer = ""; const appendActivity = (kind: ActivityKind, value: unknown) => state.activity.append(kind, value);
-		const persistUsage = (kind: string, message: any, usage: any) => { if (!usage || typeof usage !== "object") return; pi.appendEntry("agent-team-usage", { sourceEventId: `${run.runId}:${kind}:${++run.usageSequence}`, usage, provider: message?.provider, model: message?.model }); pi.events.emit("agent-team:usage", { agent: state.name }); };
+		const persistUsage = (kind: string, message: any, usage: any) => { if (!usage || typeof usage !== "object") return; state.tokens = addTokenCounts(state.tokens, tokenCountsFromUsage(usage)); pi.appendEntry("agent-team-usage", { sourceEventId: `${run.runId}:${kind}:${++run.usageSequence}`, usage, provider: message?.provider, model: message?.model }); pi.events.emit("agent-team:usage", { agent: state.name }); updateWidget(); };
 		const toolSummary = (event: any) => formatToolActivity(event.toolName, event.args ?? event.input ?? event.parameters);
 		const toolError = (event: any) => event.error ?? event.result?.error ?? (event.isError ? event.result ?? "tool failed" : undefined);
 
@@ -362,6 +374,7 @@ export default function (pi: ExtensionAPI) {
 	}
 	async function submitAgent(name: string, task: string, ctx: any) {
 		const state = stateFor(name); if (!state) throw new Error(`Unknown dynamic instance "${name}"`); if (rootAgent === state) throw new Error("The root agent cannot dispatch itself");
+		if (state.status === "waiting") throw new Error(`${displayName(state.name)} is waiting to return its result`);
 		if (state.status === "running") {
 			const run = state.activeRun;
 			if (!run || run.finished || run.stopping) throw new Error(`${displayName(state.name)} cannot be steered`);
@@ -533,7 +546,16 @@ export default function (pi: ExtensionAPI) {
 		return { systemPrompt: `${event.systemPrompt}\n\nYou are a dispatcher. Delegate through dispatch_agent only. Dynamic instances:\n${catalog}\n${delegationGuidance}\nDo not use codebase tools directly. Synthesize child results into one answer.` };
 	});
 	pi.on("model_select", (_event, ctx) => { for (const state of agentStates.values()) if (state.status !== "running") state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); updateWidget(); });
-	pi.on("agent_start", (_event, ctx) => { if (!rootAgent) return; clearInterval(rootAgent.timer); rootAgent.status = "running"; rootAgent.toolCount = 0; rootAgent.elapsed = 0; rootStartTime = Date.now(); rootAgent.timer = setInterval(() => { if (rootAgent) { rootAgent.elapsed = Date.now() - rootStartTime; updateWidget(); } }, FRAME_MS); rootAgent.timer.unref?.(); rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); syncStatus(ctx); });
+	pi.on("agent_start", (_event, ctx) => {
+		const waiting = [...agentStates.values()].find(state => state.status === "waiting");
+		if (waiting) {
+			waiting.status = waiting.pendingOutcome ?? "done";
+			waiting.pendingOutcome = undefined;
+			updateWidget();
+			syncStatus(ctx);
+		}
+		if (!rootAgent) return;
+		clearInterval(rootAgent.timer); rootAgent.status = "running"; rootAgent.toolCount = 0; rootAgent.elapsed = 0; rootStartTime = Date.now(); rootAgent.timer = setInterval(() => { if (rootAgent) { rootAgent.elapsed = Date.now() - rootStartTime; updateWidget(); } }, FRAME_MS); rootAgent.timer.unref?.(); rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); syncStatus(ctx); });
 	pi.on("message_start", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("message_update", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("message_end", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });

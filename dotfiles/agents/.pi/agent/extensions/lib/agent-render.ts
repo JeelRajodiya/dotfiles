@@ -3,10 +3,10 @@
  * can be exercised without spawning a child agent or standing up a Pi session.
  */
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { formatAgentContext } from "../agent-team-helpers";
+import { formatAgentContext, formatAgentTokens, type TokenCounts } from "../agent-team-helpers";
 import type { ActivityEntry } from "./agent-activity";
 
-export type AgentStatus = "idle" | "running" | "done" | "error";
+export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
 
 /** The subset of an agent's state that drawing depends on. AgentState satisfies this structurally. */
 export interface RenderableAgent {
@@ -19,6 +19,8 @@ export interface RenderableAgent {
 	elapsed: number;
 	contextTokens: number;
 	contextWindow: number;
+	tokens: TokenCounts;
+	pendingOutcome?: "done" | "error";
 }
 
 /** Card geometry. renderGrid pads short columns to CARD_LINES, so keep the two in step. */
@@ -28,8 +30,8 @@ export const CARD_GAP = 1;
 export const FRAME_MS = 80;
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const STATUS_ICON: Record<string, string> = { done: "✓", error: "✗", idle: "○" };
-const STATUS_COLOR: Record<string, string> = { running: "accent", done: "success", error: "error", idle: "dim" };
+const STATUS_ICON: Record<string, string> = { waiting: "↗", done: "✓", error: "✗", idle: "○" };
+const STATUS_COLOR: Record<string, string> = { running: "accent", waiting: "warning", done: "success", error: "error", idle: "dim" };
 const ACTIVITY_GLYPH: Record<string, string> = { user: "▸", assistant: "·", "tool-start": "◆", "tool-done": "✓", "tool-error": "✗" };
 const ACTIVITY_COLOR: Record<string, string> = { user: "accent", assistant: "text", "tool-start": "dim", "tool-done": "success", "tool-error": "error" };
 
@@ -81,15 +83,18 @@ export function renderCard(agent: RenderableAgent, width: number, theme: Theme, 
 	const label = agent.name.toLowerCase() === agent.def.name.toLowerCase() ? "" : theme.fg("dim", ` ${agent.def.name}`);
 	const name = `${theme.fg(statusColor(agent.status), statusGlyph(agent.status, now))} ${theme.bold(theme.fg("accent", agent.name))}${label}`;
 	const context = formatAgentContext(agent.contextTokens, agent.contextWindow);
+	const tokens = formatAgentTokens(agent.tokens);
+	const usage = `${theme.fg(contextColor(agent), context)} ${theme.fg("dim", tokens)}`;
 	const trailing = [
 		agent.toolCount || "",
+		agent.status === "waiting" ? agent.pendingOutcome === "error" ? "return error" : "returning" : "",
 		agent.status === "running" || agent.elapsed ? `${Math.round(agent.elapsed / 1000)}s` : "",
 	].filter(Boolean).join(" · ");
 
 	// The name gives up width first so the context figure always survives on a narrow card.
-	const nameWidth = Math.max(3, inner - visibleWidth(context) - visibleWidth(trailing) - (trailing ? 4 : 2));
+	const nameWidth = Math.max(3, inner - visibleWidth(usage) - visibleWidth(trailing) - (trailing ? 4 : 2));
 	const content = spread(
-		`${truncateToWidth(name, nameWidth)}  ${theme.fg(contextColor(agent), context)}`,
+		`${truncateToWidth(name, nameWidth)}  ${usage}`,
 		theme.fg("dim", trailing),
 		inner,
 	);
@@ -131,7 +136,11 @@ export function renderDetail(agent: RenderableAgent, width: number, theme: Theme
 	// Headings are literals but still need clamping: "Recent activity" overflows a narrow pane.
 	const heading = (value: string) => theme.bold(theme.fg("accent", truncateToWidth(value, width)));
 	const context = formatAgentContext(agent.contextTokens, agent.contextWindow);
-	const meta = [agent.status, options.model, `${Math.round(agent.elapsed / 1000)}s`].join(" · ");
+	const meta = [
+		agent.status === "waiting" && agent.pendingOutcome ? `${agent.status} (${agent.pendingOutcome} queued)` : agent.status,
+		options.model,
+		`${Math.round(agent.elapsed / 1000)}s`,
+	].join(" · ");
 
 	const activity = options.activity.map(entry => truncateToWidth(
 		`  ${theme.fg(ACTIVITY_COLOR[entry.kind] ?? "muted", ACTIVITY_GLYPH[entry.kind] ?? "·")} ` +
