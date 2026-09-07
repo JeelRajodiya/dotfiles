@@ -26,6 +26,11 @@ type SavedInstance = { name: string; type: string; goal: string };
 type SavedTeam = { instances: SavedInstance[]; root?: string };
 type LegacyTeamMode = { team?: string | null };
 
+function agentHeading(state: AgentState, theme: any): string {
+	const base = state.def.name;
+	return theme.bold(theme.fg("accent", state.name)) + (state.name.toLowerCase() === base.toLowerCase() ? "" : theme.fg("dim", ` (${base})`));
+}
+
 const TEAM_TOOLS = ["dispatch_agent", "set_agent_model"];
 const MAX_KEPT_SESSIONS = 20;
 /**
@@ -170,17 +175,16 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(`${displayName(state.name)} is now this session's root.`, "info");
 	}
 
-	function renderCard(state: AgentState, width: number, theme: any, root = false): string[] {
+	function renderCard(state: AgentState, width: number, theme: any): string[] {
 		const cardWidth = Math.max(1, width); const w = Math.max(1, cardWidth - 2); const trim = (value: string) => truncateToWidth(value, Math.max(1, w - 1));
 		const icon = state.status === "running" ? "●" : state.status === "done" ? "✓" : state.status === "error" ? "✗" : "○";
 		const color = state.status === "running" ? "accent" : state.status === "done" ? "success" : state.status === "error" ? "error" : "dim";
-		const label = root ? `ROOT ${state.name} (${state.def.name})` : `${state.name} (${state.def.name})`;
-		const status = `${icon} ${state.status}`; const context = formatAgentContext(state.contextTokens, state.contextWindow); const suffix = `${status} · ${context}`;
+		const status = `${icon} ${state.status}${state.status === "running" ? ` · ${Math.round(state.elapsed / 1000)}s` : ""}`; const context = formatAgentContext(state.contextTokens, state.contextWindow); const suffix = `${status} · ${context}`;
 		const labelWidth = Math.max(0, w - 1 - visibleWidth(suffix) - visibleWidth(" · "));
 		const activity = state.task ? `Task: ${state.task}` : `Goal: ${state.goal || state.def.description}`;
-		const tools = `Tools: ${state.toolCount} · ${Math.round(state.elapsed / 1000)}s`;
+		const tools = `Tools: ${state.toolCount}`;
 		const row = (content: string) => theme.fg("dim", "│") + " " + content + " ".repeat(Math.max(0, w - visibleWidth(content) - 1)) + theme.fg("dim", "│");
-		const summary = labelWidth ? theme.bold(theme.fg("accent", truncateToWidth(label, labelWidth))) + theme.fg("muted", " · ") + theme.fg(color, status) + theme.fg("muted", ` · ${context}`) : theme.fg(color, truncateToWidth(suffix, Math.max(1, w - 1)));
+		const summary = labelWidth ? truncateToWidth(agentHeading(state, theme), labelWidth) + theme.fg("muted", " · ") + theme.fg(color, status) + theme.fg("muted", ` · ${context}`) : theme.fg(color, truncateToWidth(suffix, Math.max(1, w - 1)));
 		return [theme.fg("dim", `┌${"─".repeat(w)}┐`), row(summary), row(theme.fg("muted", trim(`${activity} · ${tools}`))), theme.fg("dim", `└${"─".repeat(w)}┘`)].map(line => truncateToWidth(line, cardWidth));
 	}
 	function updateWidget() {
@@ -188,11 +192,10 @@ export default function (pi: ExtensionAPI) {
 		widgetCtx.ui.setWidget("agent-team", (_tui: any, theme: any) => {
 			const text = new Text("", 0, 0); return { invalidate() { text.invalidate(); }, render(width: number) {
 				if (viewedAgent) {
-						const state = viewedAgent; text.setText([theme.fg("accent", `${state.name} (${state.def.name}) · ${state.status}`), theme.fg("dim", `Goal: ${state.goal}\n${formatAgentContext(state.contextTokens, state.contextWindow)} tokens · ${state.toolCount} tools · ${Math.round(state.elapsed / 1000)}s`), theme.fg("muted", state.history || state.lastWork || "No child output yet."), theme.fg("dim", "Use /agent exit to close this detail view.")].join("\n")); return text.render(width);
+						const state = viewedAgent; text.setText([agentHeading(state, theme) + theme.fg("muted", ` · ${state.status}`), theme.fg("dim", `Goal: ${state.goal}\n${formatAgentContext(state.contextTokens, state.contextWindow)} tokens · ${state.toolCount} tools · ${Math.round(state.elapsed / 1000)}s`), theme.fg("muted", state.history || state.lastWork || "No child output yet."), theme.fg("dim", "Use /agent exit to close this detail view.")].join("\n")); return text.render(width);
 				}
 				if (!agentStates.size) { text.setText(theme.fg("dim", "No dynamic instances. Use /agent add <type> <name>.")); return text.render(width); }
-				const renderWidth = Math.max(1, width); const states = [...agentStates.values()].filter(state => state !== rootAgent); const rows = rootAgent ? renderCard(rootAgent, renderWidth, theme, true) : [];
-				if (rootAgent && states.length) rows.push("");
+				const renderWidth = Math.max(1, width); const states = [...agentStates.values()].filter(state => state !== rootAgent); const rows: string[] = [];
 				if (states.length) { const gap = 1; const maxCols = Math.max(1, Math.floor((renderWidth + gap) / 13)); const cols = Math.min(gridCols, states.length, maxCols); const cardWidth = Math.max(1, Math.floor((renderWidth - gap * (cols - 1)) / cols)); for (let i = 0; i < states.length; i += cols) { const cards = states.slice(i, i + cols).map(state => renderCard(state, cardWidth, theme)); while (cards.length < cols) cards.push(Array(4).fill(" ".repeat(cardWidth))); for (let line = 0; line < 4; line++) rows.push(truncateToWidth(cards.map(card => card[line]).join(" "), renderWidth)); } }
 				text.setText(rows.join("\n")); return text.render(renderWidth);
 			} };
@@ -201,7 +204,7 @@ export default function (pi: ExtensionAPI) {
 
 	function terminateRun(run: ActiveAgentRun) { run.stopping = true; run.transport.fail(new Error("Agent process stopped")); terminateChild(run.child); }
 	function finishRun(state: AgentState, run: ActiveAgentRun, error?: Error) {
-		if (run.finished || state.activeRun !== run) return; run.finished = true; clearInterval(state.timer); state.elapsed = Date.now() - run.startTime; state.status = error ? "error" : "done"; state.sessionFile = run.sessionFile;
+		if (run.finished || state.activeRun !== run) return; run.finished = true; clearInterval(state.timer); state.timer = undefined; state.elapsed = Date.now() - run.startTime; state.status = error ? "error" : "done"; state.sessionFile = run.sessionFile;
 		const output = run.textChunks.join(""); state.lastWork = error?.message ?? output.split("\n").filter(Boolean).pop() ?? ""; state.activeRun = undefined; updateWidget();
 		if (!run.stopping && run.accepted) {
 			const result = error ? error.message : output.slice(0, 8000) || "(no output)";
@@ -218,7 +221,7 @@ export default function (pi: ExtensionAPI) {
 	function startAgent(state: AgentState, task: string, ctx: any): ActiveAgentRun {
 		if (state.sessionFile && state.contextTokens > MAX_CHILD_CONTEXT_TOKENS) recycleSession(state, ctx);
 		state.status = "running"; state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); state.task = task; state.toolCount = 0; state.elapsed = 0; state.lastWork = ""; state.history = latestChildTranscript(sessionPath(state)); state.runCount++;
-		const startTime = Date.now(); state.timer = setInterval(() => { state.elapsed = Date.now() - startTime; updateWidget(); }, 1000);
+		const startTime = Date.now(); clearInterval(state.timer); state.timer = undefined; state.timer = setInterval(() => { state.elapsed = Date.now() - startTime; updateWidget(); }, 1000);
 		const file = ensureSession(state, ctx.cwd); const args = ["--mode", "rpc", "--no-extensions", "--extension", join(homedir(), ".pi", "agent", "extensions", "openai-codex-fast.ts"), "--extension", join(homedir(), ".pi", "agent", "extensions", "ponytail.ts"), "--model", effectiveModel(state, ctx), "--tools", state.def.tools, "--thinking", "off", "--append-system-prompt", `${state.def.systemPrompt}\n\n# Assigned goal\n${state.goal}`, "--session", file];
 		if (state.sessionFile) args.push("-c");
 		const child = spawn("pi", args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } }); const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
@@ -282,7 +285,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_execution_start", (event, ctx) => { if (rootAgent) { rootAgent.toolCount++; rootAgent.task = `Using ${event.toolName}`; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("tool_execution_end", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("agent_settled", (_event, ctx) => { if (!rootAgent) return; clearInterval(rootAgent.timer); rootAgent.elapsed = rootStartTime ? Date.now() - rootStartTime : rootAgent.elapsed; rootAgent.status = "done"; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); });
-	pi.on("session_shutdown", () => { for (const state of agentStates.values()) { clearInterval(state.timer); if (state.activeRun) terminateRun(state.activeRun); } });
+	pi.on("session_shutdown", () => { for (const state of agentStates.values()) { clearInterval(state.timer); state.timer = undefined; if (state.activeRun) terminateRun(state.activeRun); } });
 	pi.on("session_start", async (_event, ctx) => {
 		widgetCtx = ctx; parentSessionId = ctx.sessionManager.getSessionId(); viewedAgent = undefined; loadAgents(ctx.cwd);
 		agentModelOverrides.clear(); const overrides = ctx.sessionManager.getEntries().filter((entry: any) => entry.type === "custom" && entry.customType === "agent-team-model-overrides").pop()?.data as { overrides?: Record<string, string> } | undefined; for (const [name, model] of Object.entries(overrides?.overrides ?? {})) agentModelOverrides.set(name, model);
