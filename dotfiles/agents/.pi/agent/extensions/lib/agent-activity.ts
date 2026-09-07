@@ -33,12 +33,19 @@ export const cleanThoughtActivity = (value: unknown): string =>
 			.replace(/(^|[\s(])([*_])([^*_]+)\2(?=$|[\s).,!?])/g, "$1$3"),
 	);
 
+/**
+ * Longest overlap the seam search will look for. The scan is O(limit²) in the worst case and
+ * runs on every reasoning delta, so it is capped: a full resend is already handled by the
+ * containment checks above it, and streamed deltas never overlap by more than a few words.
+ */
+const MAX_THOUGHT_OVERLAP = 200;
+
 /** Join streamed or resent reasoning without repeating a shared prefix/suffix. */
 export function mergeThoughtActivity(previous: string, next: string): string {
 	if (!previous || !next) return previous || next;
 	if (previous.includes(next)) return previous;
 	if (next.includes(previous)) return next;
-	const limit = Math.min(previous.length, next.length);
+	const limit = Math.min(previous.length, next.length, MAX_THOUGHT_OVERLAP);
 	for (let length = limit; length > 0; length--) {
 		if (previous.endsWith(next.slice(0, length))) return `${previous}${next.slice(length)}`;
 	}
@@ -58,11 +65,15 @@ export function thoughtActivityLabel(entry: ActivityEntry, now = Date.now()): st
 
 export class ActivityLog {
 	private entries: ActivityEntry[] = [];
+	private readonly maxEntries: number;
+	private readonly maxTextLength: number;
 
-	constructor(
-		private readonly maxEntries = 24,
-		private readonly maxTextLength = 400,
-	) {}
+	// Plain fields, not constructor parameter properties: Node's strip-only TypeScript mode
+	// rejects those, and that made this module impossible to exercise without a build step.
+	constructor(maxEntries = 24, maxTextLength = 400) {
+		this.maxEntries = maxEntries;
+		this.maxTextLength = maxTextLength;
+	}
 
 	/** Keep the tail: while a reply streams, the newest words are the interesting ones. */
 	private clamp(text: string): string {
@@ -77,7 +88,8 @@ export class ActivityLog {
 		const text = cleanActivity(value);
 		if (!text || /^[{[]/.test(text)) return;
 		const last = this.entries.at(-1);
-		if ((kind === "assistant" || kind === "thought") && last?.kind === kind && !last.finishedAt) {
+		// Thoughts returned above, so only assistant deltas coalesce here.
+		if (kind === "assistant" && last?.kind === kind && !last.finishedAt) {
 			last.text = this.clamp(`${last.text} ${text}`.replace(/\s+/g, " "));
 			return;
 		}
@@ -101,10 +113,30 @@ export class ActivityLog {
 		thought.text = this.clamp(mergeThoughtActivity(thought.text, text));
 	}
 
+	/**
+	 * Open thoughts, oldest first. A tool call between thinking_start and thinking_end pushes an
+	 * entry in between, so the thought being closed is not reliably the tail.
+	 */
+	private openThoughts(): ActivityEntry[] {
+		return this.entries.filter(entry => entry.kind === "thought" && !entry.finishedAt);
+	}
+
 	finishThought(value: unknown, now = Date.now()): void {
 		this.appendThought(value);
-		const thought = this.entries.at(-1);
-		if (thought?.kind === "thought") thought.finishedAt = now;
+		// Target the open thought rather than the last entry: looking only at the tail both missed
+		// the real thought when something interleaved, and re-stamped an already-closed one when
+		// thinking_end carried no text.
+		const thought = this.openThoughts().at(-1);
+		if (thought) thought.finishedAt = now;
+	}
+
+	/**
+	 * Close anything still marked as thinking. A run that ends without a thinking_end — an error,
+	 * an abort, a child that dies — would otherwise render "Thinking (4m12s)" on a finished agent,
+	 * with the duration climbing forever.
+	 */
+	closeOpenThoughts(now = Date.now()): void {
+		for (const thought of this.openThoughts()) thought.finishedAt = now;
 	}
 
 	/** Rebuild from the `kind: text` lines that latestChildActivity() recovers from a session file. */
@@ -137,8 +169,11 @@ export class ActivityLog {
 export class OutputBuffer {
 	private text = "";
 	private truncated = false;
+	private readonly limit: number;
 
-	constructor(private readonly limit = 8000) {}
+	constructor(limit = 8000) {
+		this.limit = limit;
+	}
 
 	append(chunk: string): void {
 		if (!chunk || this.text.length >= this.limit) {
@@ -171,7 +206,11 @@ export class OutputBuffer {
  */
 export class TextTail {
 	private tail = "";
-	constructor(private readonly window = 500) {}
+	private readonly window: number;
+
+	constructor(window = 500) {
+		this.window = window;
+	}
 
 	append(delta: string): void {
 		if (!delta) return;

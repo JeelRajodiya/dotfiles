@@ -23,7 +23,10 @@ export default function codexUsage(pi: ExtensionAPI) {
 					// Without this a stalled request outlives the 60s interval and they pile up.
 					signal: AbortSignal.timeout(15_000),
 				});
-				const window = (await response.json()).rate_limit?.primary_window;
+				// response.json() is `unknown`; the shape is only asserted here, and the
+				// Number.isFinite guards below are what actually validate it.
+				const payload = await response.json() as { rate_limit?: { primary_window?: { used_percent?: number; reset_after_seconds?: number } } };
+				const window = payload.rate_limit?.primary_window;
 				const used = window?.used_percent;
 				const reset = window?.reset_after_seconds;
 				if (!response.ok || !Number.isFinite(used) || !Number.isFinite(reset)) {

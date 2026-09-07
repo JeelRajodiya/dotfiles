@@ -8,11 +8,11 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
 	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, canClearAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
-	formatToolActivity, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent, restoreWaitingAgents, rootTools, sessionTokenCounts, shouldCompleteTellTarget, shouldFinalizeAgentEvent, terminateChild, type AgentCompletionStatus, type TokenCounts,
-} from "./agent-team-helpers";
-import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity";
-import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs";
-import { FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } from "./lib/agent-render";
+	formatToolActivity, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent, restoreWaitingAgents, rootTools, sessionTokenCounts, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent, terminateChild, type AgentCompletionStatus, type TokenCounts,
+} from "./agent-team-helpers.ts";
+import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity.ts";
+import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs.ts";
+import { FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } from "./lib/agent-render.ts";
 
 interface ActiveAgentRun {
 	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; text: TextTail; stderrChunks: string[]; initialTask: string;
@@ -161,7 +161,7 @@ export default function (pi: ExtensionAPI) {
 		if (rootAgent) throw new Error(`Root is already ${displayName(rootAgent.name)} for this session`);
 		if (!current) throw new Error("Instance no longer exists");
 		state = current;
-		if (state.status === "running") throw new Error(`Wait for ${displayName(state.name)} to finish before promotion`);
+		if (state.status === "running" || state.status === "waiting") throw new Error(`Wait for ${displayName(state.name)} to finish before promotion`);
 		const modelName = effectiveModel(state, ctx); const slash = modelName.indexOf("/");
 		const model = slash > 0 ? ctx.modelRegistry.find(modelName.slice(0, slash), modelName.slice(slash + 1)) : undefined;
 		if (!model || (parentModel(ctx) !== modelName && !await pi.setModel(model))) throw new Error(`Unable to select ${modelName}`);
@@ -220,7 +220,8 @@ export default function (pi: ExtensionAPI) {
 		state.sessionFile = null;
 		state.contextTokens = 0;
 		state.tokens = { input: 0, output: 0 };
-		state.activity = ActivityLog.parse("");
+		state.activity = new ActivityLog();
+		state.runCount = 0;
 		state.task = "";
 		state.lastWork = "";
 		state.toolCount = 0;
@@ -232,6 +233,7 @@ export default function (pi: ExtensionAPI) {
 	function removeAgent(state: AgentState, ctx: any) {
 		if (state === rootAgent) throw new Error("Cannot remove the promoted root; demote it first");
 		if (state.status === "running") throw new Error(`Cannot remove ${displayName(state.name)} while it is running`);
+		if (state.status === "waiting") throw new Error(`${displayName(state.name)} is still returning its result; wait for it to land`);
 		const wasViewed = viewedAgent === state; agentStates.delete(key(state.name)); agentModelOverrides.delete(key(state.name)); discardSession(state);
 		pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) }); persistTeam();
 		if (wasViewed) viewedAgent = undefined;
@@ -283,6 +285,8 @@ export default function (pi: ExtensionAPI) {
 		clearInterval(state.timer);
 		state.timer = undefined;
 		state.elapsed = Date.now() - run.startTime;
+		// However the run ended, nothing is still thinking.
+		state.activity.closeOpenThoughts();
 		const outcome: AgentCompletionStatus = error ? "error" : "done";
 		const queuedForDelivery = !run.stopping && run.accepted;
 		state.status = resultDeliveryStatus(outcome, queuedForDelivery && (hostBusy || widgetCtx?.isIdle?.() === false));
@@ -388,7 +392,26 @@ export default function (pi: ExtensionAPI) {
 			}
 			updateWidget();
 		};
-		const line = (value: string) => { if (!value.trim()) return; try { handle(JSON.parse(value.endsWith("\r") ? value.slice(0, -1) : value)); } catch {} };
+		let reportedHandlerError = false;
+		const line = (value: string) => {
+			if (!value.trim()) return;
+			let event: unknown;
+			// Split deliberately: a partial line from the child is expected and ignorable, but a throw
+			// out of handle() is our own bug. Swallowing both is how a missing import silently disabled
+			// token accounting for three commits without a single visible symptom.
+			try { event = JSON.parse(value.endsWith("\r") ? value.slice(0, -1) : value); } catch { return; }
+			try {
+				handle(event);
+			} catch (error) {
+				const detail = error instanceof Error ? error.message : String(error);
+				state.activity.append("tool-error", `agent-team handler: ${detail}`);
+				if (!reportedHandlerError) {
+					reportedHandlerError = true;
+					widgetCtx?.ui.notify(`${displayName(state.name)}: internal handler error — ${detail}`, "error");
+				}
+				updateWidget();
+			}
+		};
 		child.stdout.setEncoding("utf-8"); child.stdout.on("data", (chunk: string) => { buffer += chunk; let newline; while ((newline = buffer.indexOf("\n")) !== -1) { line(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1); } });
 		// Keep the tail of stderr: without it a child that dies on startup (no pi on PATH, bad model,
 		// a helper extension that throws) is indistinguishable from any other "exited with code 1".
@@ -416,7 +439,7 @@ export default function (pi: ExtensionAPI) {
 		const state = stateFor(name);
 		if (!state) throw new Error(`Unknown dynamic instance "${name}"`);
 		if (state === rootAgent) throw new Error("Use /compact for the promoted root");
-		if (state.status === "running") throw new Error(`${displayName(state.name)} is running; wait for it to finish before compacting`);
+		if (state.status === "running" || state.status === "waiting") throw new Error(`${displayName(state.name)} is ${state.status}; wait for it to finish before compacting`);
 		// Without -c the child would open a blank session and compact nothing, while still
 		// leaving the instance looking as though it had a transcript.
 		if (!state.sessionFile) throw new Error(`${displayName(state.name)} has not run yet; there is nothing to compact`);
@@ -448,6 +471,8 @@ export default function (pi: ExtensionAPI) {
 	async function activateTeam(teamName: string | undefined, ctx: any) {
 		for (const state of agentStates.values()) { if (state.activeRun) terminateRun(state.activeRun); clearInterval(state.timer); state.timer = undefined; discardSession(state); }
 		agentStates.clear(); agentModelOverrides.clear(); rootAgent = undefined; viewedAgent = undefined; rootModelRestored = true;
+		// The queue matches deliveries to instances by position; dropped instances must drop with them.
+		pendingDeliveries.length = 0;
 		const team = teamName ? teams[teamName] : undefined;
 		for (const member of team?.members ?? []) {
 			const def = definitionFor(member);

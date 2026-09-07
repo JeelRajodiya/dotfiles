@@ -3,8 +3,8 @@
  * can be exercised without spawning a child agent or standing up a Pi session.
  */
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { formatAgentContext, formatAgentTokens, type TokenCounts } from "../agent-team-helpers";
-import { thoughtActivityLabel, type ActivityEntry } from "./agent-activity";
+import { formatAgentContext, formatAgentTokens, type TokenCounts } from "../agent-team-helpers.ts";
+import { thoughtActivityLabel, type ActivityEntry } from "./agent-activity.ts";
 
 export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
 

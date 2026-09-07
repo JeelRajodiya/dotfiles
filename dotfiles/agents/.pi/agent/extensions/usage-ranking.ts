@@ -23,7 +23,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadSessions, parseSessionLines, type SessionRecord } from "./lib/session-cost";
+import { loadSessions, parseSessionLines, type SessionRecord } from "./lib/session-cost.ts";
 
 const usageFile = join(getAgentDir(), "usage-ranking.jsonl");
 const monthlyModelUsage = new Map<string, number>();

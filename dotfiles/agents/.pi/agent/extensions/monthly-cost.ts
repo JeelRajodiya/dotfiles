@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadSessions } from "./lib/session-cost";
+import { loadSessions } from "./lib/session-cost.ts";
 
 async function monthlyCost(now = new Date()): Promise<number> {
     const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;

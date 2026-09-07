@@ -24,5 +24,8 @@ assert.equal(thoughtActivityLabel(thought, 8_000), "Thought (4s) — checking th
 
 const preview = renderThoughtActivity({ kind: "thought", text: "你好世界 and a long reasoning preview", startedAt: 1_000, finishedAt: 5_200 }, 24, 8_000);
 assert.equal(visibleWidth(preview) <= 24, true);
-assert.equal(preview.endsWith("…"), true);
+// Compare the visible text: truncateToWidth closes its ellipsis with an ANSI reset, so the
+// raw string ends with "…[0m" even when the reader sees the ellipsis last.
+const visiblePreview = preview.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+assert.equal(visiblePreview.endsWith("…"), true);
 console.log("PASS: agent view thought cleanup, deduplication, width truncation, and live/completed labels");
