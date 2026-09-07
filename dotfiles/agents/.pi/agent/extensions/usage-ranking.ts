@@ -21,9 +21,9 @@ import {
 	type Focusable,
 	type TUI,
 } from "@earendil-works/pi-tui";
-import { appendFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readFile, readdir } from "node:fs/promises";
+import { loadSessions, parseSessionLines, type SessionRecord } from "./lib/session-cost";
 
 const usageFile = join(getAgentDir(), "usage-ranking.jsonl");
 const monthlyModelUsage = new Map<string, number>();
@@ -36,7 +36,8 @@ const modelKey = (model: Pick<Model<any>, "provider" | "id">) => `${model.provid
 
 const disabledModelsFile = join(getAgentDir(), "states", "disabled-models.json");
 
-function loadDisabledModels(): Set<string> {
+/** Throws on a corrupt file so a toggle never overwrites a list it could not read. */
+function readDisabledModels(): Set<string> {
 	try {
 		const data = JSON.parse(readFileSync(disabledModelsFile, "utf8"));
 		if (!Array.isArray(data) || data.some(key => typeof key !== "string"))
@@ -48,12 +49,38 @@ function loadDisabledModels(): Set<string> {
 	}
 }
 
+/**
+ * Never throws. A corrupt disabled-models.json must not take down model selection or
+ * session start, and "nothing disabled" fails open rather than hiding every model.
+ */
+function loadDisabledModels(): Set<string> {
+	try {
+		return readDisabledModels();
+	} catch {
+		return new Set();
+	}
+}
+
 function enabledModels(ctx: ExtensionContext): Model<any>[] {
 	const disabled = loadDisabledModels();
 	return ctx.modelRegistry.getAvailable().filter(model => !disabled.has(modelKey(model)));
 }
 
+// The usage log is append-only and read on every "/" keystroke, so re-read it only when
+// another process has actually changed it. Our own appends refresh the stamp in place.
+let usageStamp = "";
+const usageFileStamp = () => {
+	try {
+		const stats = statSync(usageFile);
+		return `${stats.mtimeMs}:${stats.size}`;
+	} catch {
+		return "";
+	}
+};
+
 function loadUsage() {
+	const stamp = usageFileStamp();
+	if (stamp && stamp === usageStamp) return;
 	commandUsage.clear();
 	mkdirSync(getAgentDir(), { recursive: true });
 	try {
@@ -65,6 +92,7 @@ function loadUsage() {
 			} catch {}
 		}
 	} catch {}
+	usageStamp = stamp;
 }
 
 function commandFromText(text: string): string | undefined {
@@ -76,6 +104,8 @@ function recordCommand(key: string) {
 	increment(commandUsage, key);
 	// ponytail: append-only avoids cross-process lost updates; compact if this reaches megabytes.
 	appendFileSync(usageFile, `${JSON.stringify({ type: "command", key, timestamp: new Date().toISOString() })}\n`);
+	// Already counted in memory: adopt the new stamp so the next read is not a needless reparse.
+	usageStamp = usageFileStamp();
 }
 
 function rank<T>(items: T[], counts: Map<string, number>, key: (item: T) => string, query = "", text = key): T[] {
@@ -105,34 +135,26 @@ function isInMonths(timestamp: unknown, months = 1, now = new Date()): boolean {
 	return date >= start && date <= now;
 }
 
-function scanSession(lines: string[], counts?: Map<string, number>, costs?: Map<string, number>, requests?: Map<string, number>, months = 1, now = new Date()) {
+function scanSession(records: SessionRecord[], counts?: Map<string, number>, costs?: Map<string, number>, requests?: Map<string, number>, months = 1, now = new Date()) {
 	let activeModel: string | undefined;
-	for (const line of lines) {
-		try {
-			const entry = JSON.parse(line);
-			if (entry.type === "model_change" && typeof entry.provider === "string" && typeof entry.modelId === "string")
-				activeModel = `${entry.provider}/${entry.modelId}`;
-			if (!isInMonths(entry.timestamp, months, now) || entry.type !== "message") continue;
-			const message = entry.message;
-			if (counts && message?.role === "user" && activeModel) increment(counts, activeModel);
-			if (requests && message?.role === "assistant" && typeof message.provider === "string" && typeof message.model === "string")
-				increment(requests, `${message.provider}/${message.model}`);
-			const cost = message?.usage?.cost?.total;
-			if (costs && message?.role === "assistant" && typeof message.provider === "string" &&
-				typeof message.model === "string" && typeof cost === "number" && Number.isFinite(cost) && cost >= 0)
-				increment(costs, `${message.provider}/${message.model}`, cost);
-		} catch {}
+	for (const record of records) {
+		if (record.type === "model_change") { activeModel = record.model; continue; }
+		if (record.entryType !== "message" || !isInMonths(record.iso, months, now)) continue;
+		if (counts && record.role === "user" && activeModel) increment(counts, activeModel);
+		if (requests && record.role === "assistant" && record.model) increment(requests, record.model);
+		if (costs && record.role === "assistant" && record.model && record.cost !== undefined)
+			increment(costs, record.model, record.cost);
 	}
 }
 
-function loadMonthlyUsage() {
-	const sessionsDir = join(getAgentDir(), "sessions");
-	try {
-		for (const entry of readdirSync(sessionsDir, { recursive: true, withFileTypes: true })) {
-			if (entry.isFile() && entry.name.endsWith(".jsonl"))
-				scanSession(readFileSync(join(entry.parentPath, entry.name), "utf8").split("\n"), monthlyModelUsage);
-		}
-	} catch {}
+// Deferred: a synchronous scan of every session file at import time sits on Pi's startup
+// path and grows with history. The first consumer awaits it, later ones reuse the result.
+let monthlyUsageLoad: Promise<void> | undefined;
+function ensureMonthlyUsage(): Promise<void> {
+	monthlyUsageLoad ??= (async () => {
+		for (const records of await loadSessions()) scanSession(records, monthlyModelUsage);
+	})().catch(() => {});
+	return monthlyUsageLoad;
 }
 
 async function loadMonthlyStats() {
@@ -142,12 +164,9 @@ async function loadMonthlyStats() {
 	const ratioCounts = new Map<string, number>();
 	const ratioRequests = new Map<string, number>();
 	const now = new Date();
-	const sessionsDir = join(getAgentDir(), "sessions");
-	for (const file of await readdir(sessionsDir, { recursive: true })) {
-		if (!file.endsWith(".jsonl")) continue;
-		const lines = (await readFile(join(sessionsDir, file), "utf8")).split("\n");
-		scanSession(lines, counts, costs, requests, 1, now);
-		scanSession(lines, ratioCounts, undefined, ratioRequests, 2, now);
+	for (const records of await loadSessions()) {
+		scanSession(records, counts, costs, requests, 1, now);
+		scanSession(records, ratioCounts, undefined, ratioRequests, 2, now);
 	}
 	return { counts, costs, requests, ratioCounts, ratioRequests };
 }
@@ -236,7 +255,8 @@ class ModelPicker implements Component, Focusable {
 			const model = this.filtered[this.selected];
 			if (model) {
 				try {
-					const disabled = loadDisabledModels();
+					// Strict read here: writing back a fallback would erase a list we failed to parse.
+					const disabled = readDisabledModels();
 					const key = modelKey(model);
 					if (disabled.has(key)) disabled.delete(key);
 					else disabled.add(key);
@@ -276,9 +296,6 @@ function completedModelQuery(submitting: boolean, lines: string[]): string | und
 	return match ? match[1] ?? "" : undefined;
 }
 
-loadUsage();
-loadMonthlyUsage();
-
 if (process.env.PI_USAGE_RANK_SELF_TEST) {
 	if (commandFromText('/skill:commit-unstaged') !== 'skill:commit-unstaged' ||
 		commandFromText('<skill name="commit-unstaged" location="/tmp/SKILL.md">') !== 'skill:commit-unstaged' ||
@@ -305,15 +322,19 @@ if (process.env.PI_USAGE_RANK_SELF_TEST) {
 	const requests = new Map<string, number>();
 	const costs = new Map<string, number>();
 	const timestamp = new Date().toISOString();
-	scanSession([
+	const session = parseSessionLines([
 		JSON.stringify({ type: "model_change", provider: "test", modelId: "sol" }),
 		JSON.stringify({ type: "message", timestamp, message: { role: "user" } }),
 		JSON.stringify({ type: "message", timestamp, message: { role: "assistant", provider: "test", model: "sol", usage: { cost: { total: 1.75 } } } }),
 		JSON.stringify({ type: "message", timestamp: "2000-01-01T00:00:00Z", message: { role: "user" } }),
+		"{ truncated write",
 		JSON.stringify({ type: "message", timestamp, message: { role: "assistant", provider: "test", model: "sol" } }),
 		JSON.stringify({ type: "message", timestamp, message: { role: "toolResult" } }),
 		JSON.stringify({ type: "message", timestamp: "2000-01-01T00:00:00Z", message: { role: "assistant", provider: "test", model: "sol" } }),
-	], messages, costs, requests);
+		"",
+	].join("\n"));
+	scanSession(session, messages, costs, requests);
+	// The truncated line above must cost only itself, never the entries that follow it.
 	if (messages.get("test/sol") !== 1 || requests.get("test/sol") !== 2 || costs.get("test/sol") !== 1.75) throw new Error("Monthly model aggregation failed");
 	if (requestsPerMessage(5, 2) !== "2.5 req/msg" || requestsPerMessage(0, 1) !== "0.0 req/msg" || requestsPerMessage(5, 0) !== "req/msg n/a") throw new Error("Request/message ratio failed");
 	const counts = new Map([["b", 2], ["c", 1]]);
@@ -379,6 +400,8 @@ export default function (pi: ExtensionAPI) {
 		const generation = sessionGeneration;
 		cycleQueue = cycleQueue.then(async () => {
 			if (generation !== sessionGeneration) return;
+			await ensureMonthlyUsage();
+			if (generation !== sessionGeneration) return;
 			const models = rank<Model<any>>(enabledModels(ctx), monthlyModelUsage, modelKey);
 			if (!models.length) {
 				ctx.ui.notify("No enabled models; use /model to enable one", "warning");
@@ -409,11 +432,20 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (event, ctx) => {
 		sessionGeneration++;
 		if (ctx.mode !== "tui") return;
+		const generation = sessionGeneration;
+		loadUsage();
+		try {
+			readDisabledModels();
+		} catch (error) {
+			ctx.ui.notify(`Ignoring disabled-models.json: ${String(error)}`, "warning");
+		}
 		const explicitModel = process.argv.some(arg => /^(--model|--provider)(=|$)/.test(arg));
 		const freshSession = !ctx.sessionManager.getEntries().some(entry => entry.type === "message");
 		if (event.reason === "new" || (event.reason === "startup" && freshSession && !explicitModel)) {
+			await ensureMonthlyUsage();
 			const first = rank<Model<any>>(enabledModels(ctx), monthlyModelUsage, modelKey)[0];
-			if (first && !await pi.setModel(first)) ctx.ui.notify(`No authentication for ${modelKey(first)}`, "error");
+			if (first && generation === sessionGeneration && !await pi.setModel(first))
+				ctx.ui.notify(`No authentication for ${modelKey(first)}`, "error");
 		}
 		const knownCommands = new Set([...pi.getCommands().map(command => command.name), "reload", "quit", "exit"]);
 		let submitting = false;
@@ -438,6 +470,7 @@ export default function (pi: ExtensionAPI) {
 						item => commandSearchText(item.value, query));
 				} else if (beforeCursor.startsWith("/model ") && !beforeCursor.slice(7).trim()) {
 					// Typed model searches retain the provider's relevance order (including display-name matches).
+					await ensureMonthlyUsage();
 					result.items = rank(result.items, monthlyModelUsage, item => item.value);
 				}
 				return result;

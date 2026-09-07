@@ -2,6 +2,14 @@ import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs
 import { join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+/**
+ * Support code for agent-team.ts, not an extension of its own.
+ *
+ * Pi auto-loads every `extensions/*.ts`, so this file is loaded as an extension whether
+ * or not it wants to be; the empty default export is what makes that load a no-op.
+ * (Moving it under `extensions/lib/` would avoid that, but stow links these files
+ * individually and a move would leave a dangling symlink until the next sync.)
+ */
 export default function (_pi: ExtensionAPI): void {}
 
 export function contextTokensFromUsage(usage: unknown): number | undefined {
@@ -41,20 +49,6 @@ export function formatToolActivity(name: unknown, args: unknown): string {
 	return `${cleanActivityText(name) || "tool"}${details.length ? ` — ${details.slice(0, 2).join(" · ")}` : ""}`;
 }
 
-export function latestChildTranscript(sessionFile: string, maxChars = 2000): string {
-	if (!existsSync(sessionFile)) return "";
-	const lines: string[] = [];
-	for (const line of readFileSync(sessionFile, "utf-8").split("\n")) {
-		try {
-			const message = JSON.parse(line)?.message;
-			if (!message || (message.role !== "user" && message.role !== "assistant")) continue;
-			const content = typeof message.content === "string" ? message.content : Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("") : "";
-			if (content) lines.push(`${message.role}: ${content}`);
-		} catch {}
-	}
-	return lines.join("\n").slice(-maxChars);
-}
-
 /** Compact, safe timeline recovered from a child Pi JSONL session. */
 export function latestChildActivity(sessionFile: string, maxEntries = 24): string {
 	if (!existsSync(sessionFile)) return "";
@@ -80,10 +74,6 @@ export function latestChildActivity(sessionFile: string, maxEntries = 24): strin
 		} catch {}
 	}
 	return entries.slice(-maxEntries).join("\n").slice(-5000);
-}
-
-export function hasRunningAgent(states: Iterable<{ status: string }>): boolean {
-	return Array.from(states).some(state => state.status === "running");
 }
 
 function safePathComponent(value: string, label: string): string {
@@ -145,19 +135,6 @@ export function childSessionPath(root: string, parentSessionId: string, agentNam
 export function formatAgentContext(tokens: number, contextWindow: number): string {
 	const format = (value: number) => value >= 1000 ? `${Math.round(value / 1000)}k` : `${Math.round(value)}`;
 	return `${format(tokens)}/${contextWindow > 0 ? format(contextWindow) : "?"}`;
-}
-
-export function aggregateAgentUsageCost(entries: Iterable<unknown>): number {
-	const seen = new Set<string>();
-	let total = 0;
-	for (const entry of entries) {
-		const data = entry as { sourceEventId?: unknown; usage?: { cost?: { total?: unknown } } };
-		if (typeof data.sourceEventId !== "string" || seen.has(data.sourceEventId)) continue;
-		seen.add(data.sourceEventId);
-		const cost = data.usage?.cost?.total;
-		if (typeof cost === "number" && Number.isFinite(cost)) total += cost;
-	}
-	return total;
 }
 
 type PendingRpc = {

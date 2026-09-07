@@ -25,6 +25,8 @@ export default async function (pi: ExtensionAPI) {
     ]);
     const reg = new registry.BgRegistry();
     const bash = {
+        // Only a fallback: the tool resolves `ctx.cwd || cwd` per call, so the session
+        // cwd wins and this matters solely if a call arrives without one.
         ...createBashToolDefinition(process.cwd()),
         renderResult(result: any, { expanded, isPartial }: any, theme: any, context: any) {
             const state = context.state as {

@@ -10,6 +10,8 @@ export default function codexUsage(pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | undefined;
 
 	pi.on("session_start", async (_event, ctx) => {
+		// A session restart in the same process must not leave the previous poller running.
+		clearInterval(timer);
 		const update = async () => {
 			try {
 				const auth = JSON.parse(await readFile(AUTH_FILE, "utf8"))["openai-codex"];
@@ -18,6 +20,8 @@ export default function codexUsage(pi: ExtensionAPI) {
 						Authorization: `Bearer ${auth.access}`,
 						"ChatGPT-Account-Id": auth.accountId,
 					},
+					// Without this a stalled request outlives the 60s interval and they pile up.
+					signal: AbortSignal.timeout(15_000),
 				});
 				const window = (await response.json()).rate_limit?.primary_window;
 				const used = window?.used_percent;

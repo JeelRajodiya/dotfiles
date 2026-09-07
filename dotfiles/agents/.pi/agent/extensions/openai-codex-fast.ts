@@ -12,29 +12,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export default function openAICodexFast(pi: ExtensionAPI) {
 	let enabled = false;
 
+	// The preference file is the single source of truth; the session entry only records
+	// what was in effect for this session so the transcript explains its own requests.
 	pi.on("session_start", (_event, ctx) => {
 		enabled = false;
-		for (const entry of ctx.sessionManager.getEntries()) {
-			if (entry.type === "custom" && entry.customType === STATE_TYPE && isRecord(entry.data)) {
-				enabled = entry.data.enabled === true;
-			}
-		}
 		try {
 			const saved = JSON.parse(readFileSync(preferenceFile, "utf8"));
 			if (typeof saved?.enabled === "boolean") enabled = saved.enabled;
 		} catch (error) {
-			ctx.ui.notify(`Cannot read fast-mode preference: ${String(error)}`, "warning");
+			// A missing file just means "never toggled" — only report real read failures.
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+				ctx.ui.notify(`Cannot read fast-mode preference: ${String(error)}`, "warning");
+			}
 		}
 		pi.appendEntry(STATE_TYPE, { enabled });
 		pi.events.emit("openai-fast:changed", { enabled });
-	});
-
-	pi.on("session_shutdown", (_event, ctx) => {
-		try {
-			writeFileSync(preferenceFile, `${JSON.stringify({ enabled })}\n`);
-		} catch (error) {
-			ctx.ui.notify(`Cannot save fast-mode preference: ${String(error)}`, "error");
-		}
 	});
 
 	pi.registerCommand("fast", {

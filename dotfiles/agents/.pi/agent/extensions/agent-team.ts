@@ -4,7 +4,7 @@ import { Type } from "@sinclair/typebox";
 import { Text, type AutocompleteItem, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { randomUUID } from "crypto";
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
+import { readdirSync, readFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join, resolve } from "path";
 import {
@@ -13,8 +13,9 @@ import {
 } from "./agent-team-helpers";
 
 interface AgentDef { name: string; description: string; model?: string; tools: string; systemPrompt: string; file: string; }
+const CUSTOM_AGENT: AgentDef = { name: "custom", description: "", tools: "read,grep,find,ls", systemPrompt: "You are a focused general-purpose agent. Complete the assigned goal directly and report concise results.", file: "<custom>" };
 interface ActiveAgentRun {
-	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; textChunks: string[]; initialTask: string;
+	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; textChunks: string[]; stderrChunks: string[]; initialTask: string;
 	sessionFile: string; startTime: number; runId: string; usageSequence: number; accepted: boolean; finished: boolean; stopping: boolean; toolStarts: Map<string, { summary: string; startTime: number }>;
 }
 interface AgentState {
@@ -31,8 +32,10 @@ function agentHeading(state: AgentState, theme: any): string {
 	return theme.bold(theme.fg("accent", state.name)) + (state.name.toLowerCase() === base.toLowerCase() ? "" : theme.fg("dim", ` (${base})`));
 }
 
-function recentActivity(history: string, lastWork: string): string[] {
-	const entries: { kind: string; text: string }[] = [];
+type ActivityEntry = { kind: string; text: string };
+
+function recentActivity(history: string, lastWork: string): ActivityEntry[] {
+	const entries: ActivityEntry[] = [];
 	for (const line of history.split("\n")) {
 		const match = line.match(/^(user|assistant|tool-start|tool-done|tool-error):\s*([\s\S]*)$/i);
 		if (!match) continue;
@@ -43,9 +46,35 @@ function recentActivity(history: string, lastWork: string): string[] {
 		else entries.push({ kind, text });
 	}
 	if (!entries.length && lastWork) entries.push({ kind: "assistant", text: lastWork.replace(/\s+/g, " ").trim() });
-	const label: Record<string, string> = { user: "User", assistant: "Assistant", "tool-start": "Tool · running", "tool-done": "Tool · done", "tool-error": "Tool · error" };
-	return entries.slice(-16).map(entry => `${label[entry.kind]}: ${entry.text}`);
+	return entries.slice(-16);
 }
+
+/** Card geometry and glyphs. The grid pads short columns to CARD_LINES, so keep them in step. */
+const CARD_LINES = 3;
+const MIN_CARD_WIDTH = 20;
+const CARD_GAP = 1;
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const FRAME_MS = 80;
+const STATUS_ICON: Record<string, string> = { done: "✓", error: "✗", idle: "○" };
+const STATUS_COLOR: Record<string, string> = { running: "accent", done: "success", error: "error", idle: "dim" };
+const ACTIVITY_GLYPH: Record<string, string> = { user: "▸", assistant: "·", "tool-start": "◆", "tool-done": "✓", "tool-error": "✗" };
+const ACTIVITY_COLOR: Record<string, string> = { user: "accent", assistant: "text", "tool-start": "dim", "tool-done": "success", "tool-error": "error" };
+
+const spinnerFrame = () => SPINNER[Math.floor(Date.now() / FRAME_MS) % SPINNER.length];
+/**
+ * Colour the context figure by how full the window is, so it reads at a glance without a meter.
+ * An untouched agent stays muted rather than "healthy green", which would be noise on every card.
+ */
+function contextColor(state: AgentState, _theme: any): string {
+	if (!state.contextTokens || state.contextWindow <= 0) return "muted";
+	const fraction = state.contextTokens / state.contextWindow;
+	return fraction > 0.9 ? "error" : fraction > 0.7 ? "warning" : "success";
+}
+/** Left text, right text, flush to `width`; drops the right side when there is no room for both. */
+const spread = (left: string, right: string, width: number) => {
+	const gap = width - visibleWidth(left) - visibleWidth(right);
+	return gap < 1 ? truncateToWidth(left, width) : left + " ".repeat(gap) + right;
+};
 
 const TEAM_TOOLS = ["dispatch_agent", "set_agent_model"];
 const MAX_KEPT_SESSIONS = 20;
@@ -97,9 +126,13 @@ export default function (pi: ExtensionAPI) {
 	let allAgentDefs: AgentDef[] = []; let teams: Record<string, string[]> = {};
 	let widgetCtx: any; let sessionDir = ""; let parentSessionId = "";
 	let viewedAgent: AgentState | undefined; let rootAgent: AgentState | undefined;
-	let agentAutocompleteInstalled = false; let gridCols = 2; let rootStartTime = 0;
+	let agentAutocompleteInstalled = false; let gridCols = 3; let rootStartTime = 0;
+	/** The host's own tools, captured before this extension first narrowed them, so demote can give them back. */
+	let hostTools: string[] = []; let rootModelRestored = true;
 
 	const stateFor = (name: string) => agentStates.get(key(name));
+	const definitionFor = (type: string) => key(type) === "custom" ? CUSTOM_AGENT : allAgentDefs.find(candidate => key(candidate.name) === key(type));
+	const predefinedDefs = () => allAgentDefs.filter(def => key(def.name) !== "custom");
 	const parentModel = (ctx: any) => ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "openrouter/google/gemini-3-flash-preview";
 	const effectiveModel = (state: AgentState, ctx: any) => agentModelOverrides.get(key(state.name)) ?? state.def.model ?? parentModel(ctx);
 	const modelWindow = (model: string, ctx: any) => {
@@ -155,7 +188,7 @@ export default function (pi: ExtensionAPI) {
 		agentStates.clear(); rootAgent = undefined;
 		if (snapshot) {
 			for (const item of saved?.instances ?? []) {
-				const def = allAgentDefs.find(candidate => key(candidate.name) === key(item.type));
+				const def = definitionFor(item.type);
 				if (def && /^[a-z0-9_-]+$/i.test(item.name) && !agentStates.has(key(item.name))) agentStates.set(key(item.name), makeState(def, item.name, item.goal || def.description, item.autoName === true, item.sessionKey && /^[a-z0-9_-]+$/i.test(item.sessionKey) ? item.sessionKey : item.name));
 			}
 			rootAgent = saved?.root ? stateFor(saved.root) : undefined;
@@ -174,29 +207,62 @@ export default function (pi: ExtensionAPI) {
 		pruneSessionDirs(sessionDir, MAX_KEPT_SESSIONS); allAgentDefs = scanAgentDirs(cwd); teams = scanTeams(cwd);
 	}
 	function rootTools(state: AgentState): string[] { return [...new Set([...state.def.tools.split(",").map(tool => tool.trim()).filter(Boolean), ...TEAM_TOOLS])]; }
+	/**
+	 * Narrow the host's tools to match the current mode, and restore them when there is no mode.
+	 * setActiveTools replaces the whole tool list, so with no root and no instances the host must
+	 * keep everything it started with — otherwise a plain session is left with dispatch_agent alone.
+	 */
+	function applyActiveTools() {
+		const restricted = rootAgent ? rootTools(rootAgent) : agentStates.size ? TEAM_TOOLS : undefined;
+		if (restricted) {
+			if (!hostTools.length) hostTools = pi.getActiveTools();
+			pi.setActiveTools(restricted);
+		} else if (hostTools.length) {
+			pi.setActiveTools(hostTools); hostTools = [];
+		}
+	}
+	function statusText(): string | undefined {
+		if (viewedAgent) return `Viewing: ${viewedAgent === rootAgent ? "ROOT " : ""}${displayName(viewedAgent.name)}${viewedAgent === rootAgent ? "" : " — type to steer, /agents exit to close"}`;
+		if (rootAgent) return `Root: ${displayName(rootAgent.name)}${rootModelRestored ? "" : " (model restore failed)"}`;
+		if (!agentStates.size) return undefined;
+		const running = [...agentStates.values()].filter(state => state.status === "running").length;
+		return `Team: ${agentStates.size}${running ? ` · ${running} running` : ""}`;
+	}
+	const syncStatus = (ctx?: any) => (ctx ?? widgetCtx)?.ui.setStatus("agent-team", statusText());
 	async function promote(state: AgentState, ctx: any) {
 		await ctx.waitForIdle();
-		state = stateFor(state.name)!;
-		if (!state || rootAgent) throw new Error(rootAgent ? `Root is already ${displayName(rootAgent.name)} for this session` : "Instance no longer exists");
+		const current = stateFor(state.name);
+		if (rootAgent) throw new Error(`Root is already ${displayName(rootAgent.name)} for this session`);
+		if (!current) throw new Error("Instance no longer exists");
+		state = current;
 		if (state.status === "running") throw new Error(`Wait for ${displayName(state.name)} to finish before promotion`);
 		const modelName = effectiveModel(state, ctx); const slash = modelName.indexOf("/");
 		const model = slash > 0 ? ctx.modelRegistry.find(modelName.slice(0, slash), modelName.slice(slash + 1)) : undefined;
 		if (!model || (parentModel(ctx) !== modelName && !await pi.setModel(model))) throw new Error(`Unable to select ${modelName}`);
-		viewedAgent = undefined; rootAgent = state; pi.setActiveTools(rootTools(state)); persistTeam(); updateWidget();
-		ctx.ui.setStatus("agent-team", `Root: ${displayName(state.name)}`);
-		ctx.ui.notify(`${displayName(state.name)} is now this session's root.`, "info");
+		viewedAgent = undefined; rootAgent = state; rootModelRestored = true; applyActiveTools(); persistTeam(); updateWidget();
+		syncStatus(ctx);
+		ctx.ui.notify(`${displayName(state.name)} is now this session's root. Use /agents demote to step back.`, "info");
+	}
+	async function demote(ctx: any) {
+		await ctx.waitForIdle();
+		if (!rootAgent) throw new Error("No instance is promoted for this session");
+		if (rootAgent.status === "running") throw new Error(`Wait for ${displayName(rootAgent.name)} to finish before demoting`);
+		const previous = rootAgent;
+		rootAgent = undefined; rootModelRestored = true; clearInterval(previous.timer); previous.timer = undefined; previous.status = "idle";
+		applyActiveTools(); persistTeam(); updateWidget(); syncStatus(ctx);
+		ctx.ui.notify(`${displayName(previous.name)} is no longer this session's root; it is a dispatchable instance again.`, "info");
 	}
 	function renameAutoInstance(state: AgentState, name: string) {
 		if (state.status === "running") throw new Error(`Cannot add another ${state.def.name} while ${state.name} is running`);
 		const oldKey = key(state.name); const override = agentModelOverrides.get(oldKey);
 		agentStates.delete(oldKey); state.name = name; agentStates.set(key(name), state);
-		if (rootAgent === state) widgetCtx?.ui.setStatus("agent-team", `Root: ${displayName(name)}`);
-		if (viewedAgent === state) widgetCtx?.ui.setStatus("agent-team", `Viewing: ${displayName(name)}`);
+		syncStatus();
 		if (override) { agentModelOverrides.delete(oldKey); agentModelOverrides.set(key(name), override); pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) }); }
 	}
 	function nextAutoName(def: AgentDef): { name: string; rename?: { state: AgentState; name: string } } {
 		const base = normalizeName(def.name); const existing = stateFor(base);
 		let suffix = 1; while (stateFor(`${base}-${suffix}`)) suffix++;
+		if (def === CUSTOM_AGENT) return { name: existing ? `${base}-${suffix}` : base };
 		if (!existing) return [...agentStates.values()].some(state => state.autoName && key(state.def.name) === key(def.name)) ? { name: `${base}-${suffix}` } : { name: base };
 		if (!existing.autoName) return { name: `${base}-${suffix}` };
 		if (existing.status === "running") throw new Error(`Cannot add another ${def.name} while ${existing.name} is running`);
@@ -205,63 +271,136 @@ export default function (pi: ExtensionAPI) {
 		return { name: `${base}-${suffix}`, rename: { state: existing, name: renamed } };
 	}
 	async function addAgent(rest: string[], ctx: any, usage: string) {
-		const [type, rawName, ...extra] = rest; const def = allAgentDefs.find(candidate => key(candidate.name) === key(type || "")); const explicit = rawName !== undefined; const autoName = !explicit && def ? nextAutoName(def) : undefined; const name = explicit ? normalizeName(rawName || "") : autoName?.name || "";
-		if (!def || extra.length || explicit && !/^[a-z0-9_-]+$/.test(name)) return void ctx.ui.notify(`Usage: ${usage} <type> [name]`, "error");
+		let [type, rawName, ...extra] = rest;
+		if (!type) {
+			const selected = await ctx.ui.select("Add agent", [...predefinedDefs().map(def => def.name), "Custom…"]);
+			if (!selected) return;
+			type = selected === "Custom…" ? "custom" : selected;
+		}
+		const def = definitionFor(type); const explicit = rawName !== undefined; const autoName = !explicit && def ? nextAutoName(def) : undefined; const name = explicit ? normalizeName(rawName || "") : autoName?.name || "";
+		if (!def || extra.length || explicit && !/^[a-z0-9_-]+$/.test(name)) return void ctx.ui.notify(`Usage: ${usage} <type|custom> [name]`, "error");
 		if (agentStates.has(key(name))) return void ctx.ui.notify(`Instance "${name}" already exists`, "error");
-		const defaultGoal = def.description || `Work as ${displayName(def.name)}`; const choice = await ctx.ui.select("Set instance goal", [`Default — ${defaultGoal}`, "Custom…"]); if (!choice) return;
-		const goal = choice === "Custom…" ? (await ctx.ui.input("Custom goal", "Goal for this instance"))?.trim() : defaultGoal; if (!goal) return;
+		const goal = def === CUSTOM_AGENT ? (await ctx.ui.input("Custom goal", "Goal for this instance"))?.trim() : def.description || `Work as ${displayName(def.name)}`;
+		if (!goal) return;
 		if (autoName?.rename) renameAutoInstance(autoName.rename.state, autoName.rename.name);
-		const state = makeState(def, name, goal, !explicit, randomUUID()); agentStates.set(key(name), state); if (!rootAgent) pi.setActiveTools(TEAM_TOOLS); persistTeam(); updateWidget(); ctx.ui.notify(`Added ${displayName(name)} (${def.name})`, "info");
+		const state = makeState(def, name, goal, !explicit, randomUUID()); agentStates.set(key(name), state); applyActiveTools(); persistTeam(); updateWidget(); syncStatus(ctx); ctx.ui.notify(`Added ${displayName(name)} (${def.name})`, "info");
+	}
+	/** Drop a child transcript that is no longer reachable through any instance. */
+	function discardSession(state: AgentState) {
+		try { rmSync(sessionPath(state), { force: true }); } catch {}
 	}
 	function removeAgent(state: AgentState, ctx: any) {
-		if (state === rootAgent) throw new Error("Cannot remove the promoted root");
+		if (state === rootAgent) throw new Error("Cannot remove the promoted root; demote it first");
 		if (state.status === "running") throw new Error(`Cannot remove ${displayName(state.name)} while it is running`);
-		const wasViewed = viewedAgent === state; agentStates.delete(key(state.name)); agentModelOverrides.delete(key(state.name));
+		const wasViewed = viewedAgent === state; agentStates.delete(key(state.name)); agentModelOverrides.delete(key(state.name)); discardSession(state);
 		pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) }); persistTeam();
-		if (wasViewed) { viewedAgent = undefined; ctx.ui.setStatus("agent-team", undefined); }
-		updateWidget(); ctx.ui.notify(`Removed ${displayName(state.name)}`, "info");
+		if (wasViewed) viewedAgent = undefined;
+		applyActiveTools(); updateWidget(); syncStatus(ctx); ctx.ui.notify(`Removed ${displayName(state.name)}`, "info");
 	}
 
+	/**
+	 * One agent as a single-row card:
+	 *
+	 *   ╭─────────────────────────────╮
+	 *   │ ⠹ planner  42k/200k  7 · 14s│   glyph, name, context, tools · elapsed
+	 *   ╰─────────────────────────────╯
+	 *
+	 * Deliberately just identity and vitals. The goal and the current task are prose
+	 * that never fits a column, so they live in `/agents detail <name>` instead, which
+	 * keeps cards narrow enough to sit three or more across.
+	 */
 	function renderCard(state: AgentState, width: number, theme: any): string[] {
-		const cardWidth = Math.max(1, width); const w = Math.max(1, cardWidth - 2); const trim = (value: string) => truncateToWidth(value, Math.max(1, w - 1));
-		const icon = state.status === "running" ? "●" : state.status === "done" ? "✓" : state.status === "error" ? "✗" : "○";
-		const color = state.status === "running" ? "accent" : state.status === "done" ? "success" : state.status === "error" ? "error" : "dim";
-		const status = `${icon} ${state.status}${state.status === "running" ? ` · ${Math.round(state.elapsed / 1000)}s` : ""}`; const context = formatAgentContext(state.contextTokens, state.contextWindow); const suffix = `${status} · ${context}`;
-		const labelWidth = Math.max(0, w - 1 - visibleWidth(suffix) - visibleWidth(" · "));
-		const activity = state.task ? `Task: ${state.task}` : `Goal: ${state.goal || state.def.description}`;
-		const tools = `Tools: ${state.toolCount}`;
-		const row = (content: string) => theme.fg("dim", "│") + " " + content + " ".repeat(Math.max(0, w - visibleWidth(content) - 1)) + theme.fg("dim", "│");
-		const summary = labelWidth ? truncateToWidth(agentHeading(state, theme), labelWidth) + theme.fg("muted", " · ") + theme.fg(color, status) + theme.fg("muted", ` · ${context}`) : theme.fg(color, truncateToWidth(suffix, Math.max(1, w - 1)));
-		return [theme.fg("dim", `┌${"─".repeat(w)}┐`), row(summary), row(theme.fg("muted", trim(`${activity} · ${tools}`))), theme.fg("dim", `└${"─".repeat(w)}┘`)].map(line => truncateToWidth(line, cardWidth));
+		const cardWidth = Math.max(MIN_CARD_WIDTH, width);
+		const inner = cardWidth - 4;
+		const running = state.status === "running";
+		const glyph = running ? spinnerFrame() : STATUS_ICON[state.status] ?? "○";
+		const rule = (left: string, right: string) => theme.fg("dim", left + "─".repeat(cardWidth - 2) + right);
+
+		const label = key(state.name) === key(state.def.name) ? "" : theme.fg("dim", ` ${state.def.name}`);
+		const context = formatAgentContext(state.contextTokens, state.contextWindow);
+		const name = `${theme.fg(STATUS_COLOR[state.status] ?? "dim", glyph)} ${theme.bold(theme.fg("accent", state.name))}${label}`;
+		const trailing = [state.toolCount || "", running || state.elapsed ? `${Math.round(state.elapsed / 1000)}s` : ""].filter(Boolean).join(" · ");
+		// The name gives up width first so the context figure always survives on a narrow card.
+		const nameWidth = Math.max(3, inner - visibleWidth(context) - visibleWidth(trailing) - (trailing ? 4 : 2));
+		const content = spread(`${truncateToWidth(name, nameWidth)}  ${theme.fg(contextColor(state, theme), context)}`,
+			theme.fg("dim", trailing), inner);
+
+		const row = theme.fg("dim", "│") + " " + content + " ".repeat(Math.max(0, inner - visibleWidth(content))) + " " + theme.fg("dim", "│");
+		return [rule("╭", "╮"), row, rule("╰", "╯")].map(line => truncateToWidth(line, cardWidth));
 	}
-	function updateWidget() {
+	function renderDetail(state: AgentState, width: number, theme: any): string {
+		const clean = (value: string) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim();
+		const line = (value: string) => truncateToWidth(clean(value), width);
+		const indent = (value: string) => truncateToWidth(`  ${clean(value)}`, width);
+		const heading = (value: string) => theme.bold(theme.fg("accent", value));
+		const running = state.status === "running";
+		const glyph = running ? spinnerFrame() : STATUS_ICON[state.status] ?? "○";
+		const context = formatAgentContext(state.contextTokens, state.contextWindow);
+		const meta = [state.status, effectiveModel(state, widgetCtx), `${Math.round(state.elapsed / 1000)}s`].join(" · ");
+		const activity = recentActivity(state.history, state.lastWork).map(entry =>
+			truncateToWidth(`  ${theme.fg(ACTIVITY_COLOR[entry.kind] ?? "muted", ACTIVITY_GLYPH[entry.kind] ?? "·")} ${theme.fg(entry.kind === "assistant" ? "text" : "muted", clean(entry.text))}`, width));
+
+		return [
+			truncateToWidth(`${theme.fg(STATUS_COLOR[state.status] ?? "dim", glyph)} ${agentHeading(state, theme)}  ${theme.fg(contextColor(state, theme), context)}`, width),
+			theme.fg("dim", line(meta)),
+			"",
+			heading("Goal"), theme.fg("muted", indent(state.goal || state.def.description)),
+			"",
+			heading("Current task"), theme.fg(state.task ? "text" : "muted", indent(state.task || "No active task.")),
+			"",
+			heading("Recent activity"), activity.join("\n") || theme.fg("muted", indent("No recent activity.")),
+			"",
+			theme.fg("dim", line("Type a message to steer this agent · /agents exit to close")),
+		].join("\n");
+	}
+	function renderWidget() {
 		if (!widgetCtx) return;
 		widgetCtx.ui.setWidget("agent-team", (_tui: any, theme: any) => {
 			const text = new Text("", 0, 0); return { invalidate() { text.invalidate(); }, render(width: number) {
-				if (viewedAgent) {
-						const state = viewedAgent; const activity = recentActivity(state.history, state.lastWork); const detailWidth = Math.max(12, width);
-						const detail = (value: string) => truncateToWidth(value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim(), detailWidth);
-						text.setText([
-							agentHeading(state, theme),
-							theme.fg("dim", detail(`Status: ${state.status} · Model: ${effectiveModel(state, widgetCtx)} · Context: ${formatAgentContext(state.contextTokens, state.contextWindow)} · Elapsed: ${Math.round(state.elapsed / 1000)}s`)),
-							"", theme.bold("Goal"), detail(state.goal || state.def.description),
-							theme.bold("Current task"), detail(state.task || "No active task."),
-							theme.bold("Recent activity"), theme.fg("muted", activity.map(detail).join("\n") || "No recent activity."),
-							theme.fg("dim", "Type a message to steer this agent. Use /agents exit to close."),
-						].join("\n")); return text.render(width);
+				const renderWidth = Math.max(1, width);
+				if (viewedAgent) { text.setText(renderDetail(viewedAgent, Math.max(12, renderWidth), theme)); return text.render(renderWidth); }
+				if (!agentStates.size) {
+					text.setText(theme.fg("dim", truncateToWidth("○ No instances · /agents add <type|custom> [name] to build a team", renderWidth)));
+					return text.render(renderWidth);
 				}
-				if (!agentStates.size) { text.setText(theme.fg("dim", "No dynamic instances. Use /agents add <type> [name].")); return text.render(width); }
-				const renderWidth = Math.max(1, width); const states = [...agentStates.values()].filter(state => state !== rootAgent); const rows: string[] = [];
-				if (states.length) { const gap = 1; const maxCols = Math.max(1, Math.floor((renderWidth + gap) / 13)); const cols = Math.min(gridCols, states.length, maxCols); const cardWidth = Math.max(1, Math.floor((renderWidth - gap * (cols - 1)) / cols)); for (let i = 0; i < states.length; i += cols) { const cards = states.slice(i, i + cols).map(state => renderCard(state, cardWidth, theme)); while (cards.length < cols) cards.push(Array(4).fill(" ".repeat(cardWidth))); for (let line = 0; line < 4; line++) rows.push(truncateToWidth(cards.map(card => card[line]).join(" "), renderWidth)); } }
+				const states = [...agentStates.values()].filter(state => state !== rootAgent);
+				const rows: string[] = [];
+				if (states.length) {
+					const maxCols = Math.max(1, Math.floor((renderWidth + CARD_GAP) / (MIN_CARD_WIDTH + CARD_GAP)));
+					const cols = Math.min(gridCols, states.length, maxCols);
+					const cardWidth = Math.max(MIN_CARD_WIDTH, Math.floor((renderWidth - CARD_GAP * (cols - 1)) / cols));
+					for (let i = 0; i < states.length; i += cols) {
+						const cards = states.slice(i, i + cols).map(state => renderCard(state, cardWidth, theme));
+						while (cards.length < cols) cards.push(Array(CARD_LINES).fill(" ".repeat(cardWidth)));
+						for (let row = 0; row < CARD_LINES; row++)
+							rows.push(truncateToWidth(cards.map(card => card[row]).join(" ".repeat(CARD_GAP)), renderWidth));
+					}
+				}
 				text.setText(rows.join("\n")); return text.render(renderWidth);
 			} };
 		});
+	}
+	/**
+	 * Coalesce repaints. Token deltas and per-agent tick timers both call this far faster than a
+	 * terminal can usefully redraw, and every call re-registers the widget. Leading edge keeps the
+	 * UI responsive, the trailing edge makes sure the last change is never the one that is dropped.
+	 */
+	let repaintTimer: ReturnType<typeof setTimeout> | undefined;
+	let repaintPending = false;
+	function updateWidget() {
+		if (repaintTimer) { repaintPending = true; return; }
+		renderWidget();
+		repaintTimer = setTimeout(() => {
+			repaintTimer = undefined;
+			if (repaintPending) { repaintPending = false; updateWidget(); }
+		}, FRAME_MS);
+		repaintTimer.unref?.();
 	}
 
 	function terminateRun(run: ActiveAgentRun) { run.stopping = true; run.transport.fail(new Error("Agent process stopped")); terminateChild(run.child); }
 	function finishRun(state: AgentState, run: ActiveAgentRun, error?: Error) {
 		if (run.finished || state.activeRun !== run) return; run.finished = true; clearInterval(state.timer); state.timer = undefined; state.elapsed = Date.now() - run.startTime; state.status = error ? "error" : "done"; state.sessionFile = run.sessionFile;
-		const output = run.textChunks.join(""); state.lastWork = error?.message ?? output.split("\n").filter(Boolean).pop() ?? ""; state.activeRun = undefined; updateWidget();
+		const output = run.textChunks.join(""); state.lastWork = error?.message ?? output.split("\n").filter(Boolean).pop() ?? ""; state.activeRun = undefined; updateWidget(); syncStatus();
 		if (!run.stopping && run.accepted) {
 			const result = error ? error.message : output.slice(0, 8000) || "(no output)";
 			pi.sendMessage({ customType: "agent-team-result", content: `Private result from ${state.name} (${state.def.name}) for ${run.initialTask}:\n${result}`, display: false, details: { agent: state.name, status: state.status, elapsed: state.elapsed } }, { deliverAs: "followUp", triggerTurn: true });
@@ -269,18 +408,34 @@ export default function (pi: ExtensionAPI) {
 		}
 		terminateRun(run);
 	}
-	function startAgent(state: AgentState, task: string, ctx: any): ActiveAgentRun {
-		state.status = "running"; state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); state.task = task; state.toolCount = 0; state.elapsed = 0; state.lastWork = ""; state.history = `${latestChildActivity(sessionPath(state))}\nuser: ${task}`.slice(-5000); state.runCount++;
-		const startTime = Date.now(); clearInterval(state.timer); state.timer = undefined; state.timer = setInterval(() => { state.elapsed = Date.now() - startTime; updateWidget(); }, 1000);
-		const file = ensureSession(state, ctx.cwd); const args = ["--mode", "rpc", "--no-extensions", "--extension", join(homedir(), ".pi", "agent", "extensions", "openai-codex-fast.ts"), "--extension", join(homedir(), ".pi", "agent", "extensions", "ponytail.ts"), "--model", effectiveModel(state, ctx), "--tools", state.def.tools, "--thinking", "off", "--append-system-prompt", `${state.def.systemPrompt}\n\n# Assigned goal\n${state.goal}`, "--session", file];
+	function startAgent(state: AgentState, task: string, ctx: any, options: { record?: boolean } = {}): ActiveAgentRun {
+		state.status = "running"; state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); state.toolCount = 0; state.elapsed = 0; state.lastWork = "";
+		// Maintenance runs (compaction) must not enter the transcript as a task the agent was given.
+		if (options.record === false) state.task = "Compacting";
+		else { state.task = task; state.history = `${latestChildActivity(sessionPath(state))}\nuser: ${task}`.slice(-5000); state.runCount++; }
+		// Ticks at frame rate so the spinner turns; updateWidget throttles the actual repaints.
+		const startTime = Date.now(); clearInterval(state.timer); state.timer = setInterval(() => { state.elapsed = Date.now() - startTime; updateWidget(); }, FRAME_MS);
+		state.timer.unref?.();
+		const file = ensureSession(state, ctx.cwd);
+		// Resolve against the configured agent dir, not a hardcoded ~/.pi, and skip what is not installed
+		// so one missing helper extension cannot stop every child from starting.
+		const childExtensions = ["openai-codex-fast.ts", "ponytail.ts"]
+			.map(name => join(getAgentDir(), "extensions", name)).filter(existsSync)
+			.flatMap(path => ["--extension", path]);
+		const args = ["--mode", "rpc", "--no-extensions", ...childExtensions, "--model", effectiveModel(state, ctx), "--tools", state.def.tools, "--thinking", "off", "--append-system-prompt", `${state.def.systemPrompt}\n\n# Assigned goal\n${state.goal}`, "--session", file];
 		if (state.sessionFile) args.push("-c");
-		const child = spawn("pi", args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } }); const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
-		const run: ActiveAgentRun = { child, transport, textChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, toolStarts: new Map() }; state.activeRun = run; updateWidget();
+		const child = spawn(process.env.PI_BIN || "pi", args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } }); const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
+		const run: ActiveAgentRun = { child, transport, textChunks: [], stderrChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, toolStarts: new Map() }; state.activeRun = run; updateWidget();
 		let buffer = ""; const appendActivity = (kind: string, value: unknown) => { const text = String(value ?? "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim(); if (text) state.history = `${state.history}\n${kind}: ${text}`.slice(-5000); };
-		const persistUsage = (kind: string, message: any, usage: any) => { if (!usage || typeof usage !== "object") return; pi.appendEntry("agent-team-usage", { sourceEventId: `${run.runId}:${kind}:${++run.usageSequence}`, usage, provider: message?.provider, model: message?.model }); pi.events.emit("agent-team:usage"); };
+		const persistUsage = (kind: string, message: any, usage: any) => { if (!usage || typeof usage !== "object") return; pi.appendEntry("agent-team-usage", { sourceEventId: `${run.runId}:${kind}:${++run.usageSequence}`, usage, provider: message?.provider, model: message?.model }); pi.events.emit("agent-team:usage", { agent: state.name }); };
 		const handle = (event: any) => { if (transport.handle(event)) return; if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") { const delta = event.assistantMessageEvent.delta || ""; run.textChunks.push(delta); state.lastWork = run.textChunks.join("").split("\n").filter(Boolean).pop() || ""; appendActivity("assistant", delta); updateWidget(); } else if (event.type === "tool_execution_start") { state.toolCount++; const id = event.toolCallId ?? event.id ?? `${event.toolName}:${state.toolCount}`; const summary = formatToolActivity(event.toolName, event.args ?? event.input ?? event.parameters); run.toolStarts.set(id, { summary, startTime: Date.now() }); appendActivity("tool-start", summary); updateWidget(); } else if (event.type === "tool_execution_end") { const id = event.toolCallId ?? event.id; const started = id ? run.toolStarts.get(id) : undefined; const summary = started?.summary ?? formatToolActivity(event.toolName, event.args ?? event.input ?? event.parameters); const elapsed = started ? ` · ${Math.max(0, Math.round((Date.now() - started.startTime) / 1000))}s` : ""; const error = event.error ?? event.result?.error ?? (event.isError ? event.result ?? "tool failed" : undefined); appendActivity(error ? "tool-error" : "tool-done", `${summary}${elapsed}${error ? ` — ${String(error).slice(0, 96)}` : ""}`); updateWidget(); } else if (event.type === "message_end") { const finalText = event.message?.role === "assistant" && !run.textChunks.length ? (typeof event.message.content === "string" ? event.message.content : event.message.content?.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("")) : ""; if (finalText) appendActivity("assistant", finalText); const tokens = contextTokensFromUsage(event.message?.usage); if (tokens !== undefined) state.contextTokens = tokens; persistUsage("message", event.message, event.message?.usage); updateWidget(); } else if (event.type === "compaction_end") persistUsage("compaction", event.result, event.result?.usage); else if (shouldFinalizeAgentEvent(event.type)) finishRun(state, run); };
 		const line = (value: string) => { if (!value.trim()) return; try { handle(JSON.parse(value.endsWith("\r") ? value.slice(0, -1) : value)); } catch {} };
-		child.stdout.setEncoding("utf-8"); child.stdout.on("data", (chunk: string) => { buffer += chunk; let newline; while ((newline = buffer.indexOf("\n")) !== -1) { line(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1); } }); child.stderr.on("data", () => {}); child.stdin.on("error", error => transport.fail(error)); child.on("error", error => { transport.fail(error); if (!run.stopping) finishRun(state, run, new Error(`Agent process error: ${error.message}`)); }); child.on("close", code => { line(buffer); transport.fail(new Error(`Agent process exited with code ${code ?? 1}`)); if (!run.finished && !run.stopping) finishRun(state, run, new Error(`Agent process exited before settling (code ${code ?? 1})`)); });
+		child.stdout.setEncoding("utf-8"); child.stdout.on("data", (chunk: string) => { buffer += chunk; let newline; while ((newline = buffer.indexOf("\n")) !== -1) { line(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1); } });
+		// Keep the tail of stderr: without it a child that dies on startup (no pi on PATH, bad model,
+		// a helper extension that throws) is indistinguishable from any other "exited with code 1".
+		child.stderr.setEncoding("utf-8"); child.stderr.on("data", (chunk: string) => { run.stderrChunks.push(chunk); if (run.stderrChunks.length > 50) run.stderrChunks.splice(0, run.stderrChunks.length - 50); });
+		const withStderr = (message: string) => { const detail = run.stderrChunks.join("").replace(/\s+/g, " ").trim().slice(-400); return detail ? `${message}: ${detail}` : message; };
+		child.stdin.on("error", error => transport.fail(error)); child.on("error", error => { transport.fail(error); if (!run.stopping) finishRun(state, run, new Error(withStderr(`Agent process error: ${error.message}`))); }); child.on("close", code => { line(buffer); transport.fail(new Error(withStderr(`Agent process exited with code ${code ?? 1}`))); if (!run.finished && !run.stopping) finishRun(state, run, new Error(withStderr(`Agent process exited before settling (code ${code ?? 1})`))); });
 		return run;
 	}
 	async function submitAgent(name: string, task: string, ctx: any) {
@@ -293,7 +448,10 @@ export default function (pi: ExtensionAPI) {
 		if (!state) throw new Error(`Unknown dynamic instance "${name}"`);
 		if (state === rootAgent) throw new Error("Use /compact for the promoted root");
 		if (state.status === "running") throw new Error(`${displayName(state.name)} is running; wait for it to finish before compacting`);
-		const run = startAgent(state, "Compacting child session", ctx);
+		// Without -c the child would open a blank session and compact nothing, while still
+		// leaving the instance looking as though it had a transcript.
+		if (!state.sessionFile) throw new Error(`${displayName(state.name)} has not run yet; there is nothing to compact`);
+		const run = startAgent(state, "", ctx, { record: false });
 		try {
 			await run.transport.request({ type: "compact" });
 			finishRun(state, run);
@@ -311,22 +469,22 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({ name: "dispatch_agent", label: "Dispatch Agent", description: "Dispatch or steer a named dynamic team instance. Results return privately for one host response.", parameters: Type.Object({ agent: Type.String({ description: "Unique dynamic instance name" }), task: Type.String({ description: "Focused task" }) }),
 		async execute(_id, params, _signal, _update, ctx) { const { agent, task } = params as { agent: string; task: string }; const submitted = await submitAgent(agent, task, ctx); return { content: [{ type: "text", text: `${displayName(agent)} ${submitted.status === "steered" ? "steering accepted" : "is working in the background"}.` }], details: { agent, status: submitted.status } }; },
 		renderCall(args, theme) { const task = (args as any).task || ""; return new Text(theme.fg("toolTitle", theme.bold("dispatch_agent ")) + theme.fg("accent", (args as any).agent || "?") + theme.fg("dim", ` — ${task.slice(0, 60)}`), 0, 0); },
-		renderResult(result, _options, theme) { const details = result.details as any; return new Text(theme.fg(details?.status === "steered" ? "accent" : "accent", `${details?.status === "steered" ? "●" : "●"} ${details?.agent || "agent"}`) + theme.fg("dim", details?.status === "steered" ? " steering accepted" : " working..."), 0, 0); },
+		renderResult(result, _options, theme) { const details = result.details as any; return new Text(theme.fg("accent", `● ${details?.agent || "agent"}`) + theme.fg("dim", details?.status === "steered" ? " steering accepted" : " working..."), 0, 0); },
 	});
 	pi.registerTool({ name: "set_agent_model", label: "Set Agent Model", description: "Set a session model for a named dynamic instance.", parameters: Type.Object({ agent: Type.String(), model: Type.String() }), async execute(_id, params, _signal, _update, ctx) { const { agent, model } = params as { agent: string; model: string }; const state = stateFor(agent); if (!state) throw new Error(`Unknown dynamic instance "${agent}"`); if (state === rootAgent) throw new Error("Change the root model with /agents model <name> <model|inherit> when the host is idle"); return { content: [{ type: "text", text: `${state.name}: ${setInstanceModel(state, model, ctx)}` }], details: { agent: state.name } }; } });
 
-	const usage = "Usage: /agents add <type> [name] | remove <name> | compact <name> | promote <name> | list | model <name> [model|inherit] | detail <name> | exit | grid <1-6> | team <team-name|off>";
+	const usage = "Usage: /agents add <type|custom> [name] | remove <name> | compact <name> | promote <name> | demote | list | model <name> [model|inherit] | detail <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
 	function activateTeam(teamName: string | undefined, ctx: any) {
-		for (const state of agentStates.values()) if (state.activeRun) terminateRun(state.activeRun);
-		agentStates.clear(); agentModelOverrides.clear(); rootAgent = undefined; viewedAgent = undefined;
+		for (const state of agentStates.values()) { if (state.activeRun) terminateRun(state.activeRun); clearInterval(state.timer); state.timer = undefined; discardSession(state); }
+		agentStates.clear(); agentModelOverrides.clear(); rootAgent = undefined; viewedAgent = undefined; rootModelRestored = true;
 		for (const member of teamName ? teams[teamName] ?? [] : []) {
 			const def = allAgentDefs.find(candidate => key(candidate.name) === key(member));
 			if (def) agentStates.set(key(def.name), makeState(def, def.name, def.description));
 		}
-		pi.appendEntry("agent-team-model-overrides", { overrides: {} }); persistTeam(); pi.setActiveTools(TEAM_TOOLS);
-		ctx.ui.setStatus("agent-team", undefined); updateWidget();
+		pi.appendEntry("agent-team-model-overrides", { overrides: {} }); persistTeam(); applyActiveTools();
+		updateWidget(); syncStatus(ctx);
 	}
 	const getAgentArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
 		const trailing = /\s$/.test(prefix); const parts = prefix.trim() ? prefix.trim().split(/\s+/) : [];
@@ -335,8 +493,8 @@ export default function (pi: ExtensionAPI) {
 			const matches = choices.filter(value => value.toLowerCase().startsWith(current.toLowerCase())).map(value => ({ value: `${base}${value}`, label: value }));
 			return matches.length ? matches : null;
 		};
-		if (!command || parts.length === 1 && !trailing) return values(["add", "remove", "compact", "promote", "list", "model", "detail", "grid", "team", "help", ...(viewedAgent ? ["exit"] : [])]);
-		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(allAgentDefs.map(def => def.name), "add ");
+		if (!command || parts.length === 1 && !trailing) return values(["add", "remove", "compact", "promote", "list", "model", "detail", "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
+		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...predefinedDefs().map(def => def.name), "custom"], "add ").map(item => item.label === "custom" ? { ...item, label: "Custom…" } : item);
 		if (command === "remove" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running").map(state => state.name), "remove ");
 		if (command === "compact" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent).map(state => state.name), "compact ");
 		if (command === "promote" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running").map(state => state.name), "promote ");
@@ -352,41 +510,73 @@ export default function (pi: ExtensionAPI) {
 		getArgumentCompletions: getAgentArgumentCompletions,
 		async handler(args, ctx) {
 			widgetCtx = ctx; const [command, ...rest] = args.trim().split(/\s+/); const name = rest.join(" ");
-			if (!command || command === "help") return void ctx.ui.notify(usage, "info");
-			if (command === "list" && !rest.length) return listInstances(ctx);
+			const fail = (error: unknown) => ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			if (command === "help") return void ctx.ui.notify(usage, "info");
+			// Bare /agents answers the question you actually have: what is on the team right now.
+			if (!command || command === "list" && !rest.length) return listInstances(ctx);
 			if (command === "grid") { const value = rest[0] || ""; if (!/^[1-6]$/.test(value) || rest.length !== 1) return void ctx.ui.notify("Usage: /agents grid <1-6>", "error"); gridCols = Number(value); updateWidget(); return; }
-			if (command === "add") { try { await addAgent(rest, ctx, "/agents add"); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return; }
-			if (command === "remove") { const state = stateFor(name); if (!state) return void ctx.ui.notify(`Unknown instance "${name}". Usage: /agents remove <name>`, "error"); try { removeAgent(state, ctx); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return; }
-			if (command === "compact") { if (!name) return void ctx.ui.notify("Usage: /agents compact <name>", "error"); try { await compactAgent(name, ctx); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return; }
-			if (command === "promote") { const state = stateFor(name); if (!state || state === rootAgent) return void ctx.ui.notify("Usage: /agents promote <name>", "error"); try { await promote(state, ctx); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return; }
+			if (command === "add") { try { await addAgent(rest, ctx, "/agents add"); } catch (error) { fail(error); } return; }
+			if (command === "remove") { const state = stateFor(name); if (!state) return void ctx.ui.notify(`Unknown instance "${name}". Usage: /agents remove <name>`, "error"); try { removeAgent(state, ctx); } catch (error) { fail(error); } return; }
+			if (command === "compact") { if (!name) return void ctx.ui.notify("Usage: /agents compact <name>", "error"); try { await compactAgent(name, ctx); } catch (error) { fail(error); } return; }
+			if (command === "promote") { const state = stateFor(name); if (!state || state === rootAgent) return void ctx.ui.notify("Usage: /agents promote <name>", "error"); try { await promote(state, ctx); } catch (error) { fail(error); } return; }
+			if (command === "demote") { if (rest.length) return void ctx.ui.notify("Usage: /agents demote", "error"); try { await demote(ctx); } catch (error) { fail(error); } return; }
 			if (command === "model") {
 				const [instance, model] = rest; const state = stateFor(instance || "");
 				if (!instance) return listInstances(ctx);
 				if (!state || rest.length > 2) return void ctx.ui.notify("Usage: /agents model <name> [model|inherit]", "error");
 				let requested = model;
 				if (!requested) { requested = await ctx.ui.select(`Model for ${state.name} (${modelSetting(state, ctx)})`, ["inherit", ...availableModels()]); if (!requested) return; }
-				try { let target = state; if (target === rootAgent) { await ctx.waitForIdle(); target = stateFor(instance)!; if (target !== rootAgent) throw new Error("Root changed while waiting for host idle"); ctx.ui.notify(`ROOT ${target.name}: ${await setRootModel(target, requested, ctx)}`, "info"); } else ctx.ui.notify(`${target.name}: ${setInstanceModel(target, requested, ctx)}`, "info"); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
+				try { let target = state; if (target === rootAgent) { await ctx.waitForIdle(); target = stateFor(instance)!; if (target !== rootAgent) throw new Error("Root changed while waiting for host idle"); ctx.ui.notify(`ROOT ${target.name}: ${await setRootModel(target, requested, ctx)}`, "info"); } else ctx.ui.notify(`${target.name}: ${setInstanceModel(target, requested, ctx)}`, "info"); } catch (error) { fail(error); }
 				return;
 			}
-			if (command === "detail") { const state = stateFor(name); if (!state) return void ctx.ui.notify("Usage: /agents detail <name>", "error"); viewedAgent = state; ctx.ui.setStatus("agent-team", `Viewing: ${state === rootAgent ? "ROOT " : ""}${displayName(state.name)}`); updateWidget(); return; }
-			if (command === "exit") { if (rest.length || !viewedAgent) return void ctx.ui.notify("No detail view is open.", "warning"); viewedAgent = undefined; ctx.ui.setStatus("agent-team", rootAgent ? `Root: ${displayName(rootAgent.name)}` : undefined); updateWidget(); return; }
-			if (command === "team") { const selected = Object.keys(teams).find(team => key(team) === key(rest[0] || "")); if (rest.length !== 1 || rest[0] !== "off" && !selected) return void ctx.ui.notify("Usage: /agents team <team-name|off>", "error"); activateTeam(selected, ctx); ctx.ui.notify(selected ? `Team: ${selected}` : "Team disabled", "info"); return; }
+			if (command === "detail") { const state = stateFor(name); if (!state) return void ctx.ui.notify("Usage: /agents detail <name>", "error"); viewedAgent = state; updateWidget(); syncStatus(ctx); return; }
+			if (command === "exit") { if (rest.length || !viewedAgent) return void ctx.ui.notify("No detail view is open.", "warning"); viewedAgent = undefined; updateWidget(); syncStatus(ctx); return; }
+			if (command === "team") {
+				const selected = Object.keys(teams).find(team => key(team) === key(rest[0] || ""));
+				if (rest.length !== 1 || rest[0] !== "off" && !selected) return void ctx.ui.notify("Usage: /agents team <team-name|off>", "error");
+				// Switching teams throws away every instance, transcript and model override, so ask first.
+				if (agentStates.size) {
+					const confirm = await ctx.ui.select(`Replace the current team? ${agentStates.size} instance(s), their transcripts and model overrides are discarded.`, ["Cancel", selected ? `Switch to ${selected}` : "Disable the team"]);
+					if (!confirm || confirm === "Cancel") return;
+				}
+				try { activateTeam(selected, ctx); ctx.ui.notify(selected ? `Team: ${selected}` : "Team disabled", "info"); } catch (error) { fail(error); }
+				return;
+			}
 			ctx.ui.notify(usage, "info");
 		},
 	});
 
-	pi.on("input", async (event, ctx) => { if (!viewedAgent || viewedAgent === rootAgent || event.text.startsWith("/")) return; try { const submitted = await submitAgent(viewedAgent.name, event.text, ctx); ctx.ui.notify(`${displayName(viewedAgent.name)} ${submitted.status === "steered" ? "steering accepted" : "started"}`, "info"); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return { action: "handled" as const }; });
+	// Only a person typing steers a viewed child. Input from another extension or from RPC is
+	// addressed to the host, and swallowing it would silently drop that message.
+	pi.on("input", async (event, ctx) => { if (event.source !== "interactive" || !viewedAgent || viewedAgent === rootAgent || event.text.startsWith("/")) return; try { const submitted = await submitAgent(viewedAgent.name, event.text, ctx); ctx.ui.notify(`${displayName(viewedAgent.name)} ${submitted.status === "steered" ? "steering accepted" : "started"}`, "info"); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return { action: "handled" as const }; });
+	// Prompt catalogs are deliberately summaries, never child output, history, or tool activity.
+	const promptSummary = (value: string, limit: number) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, limit);
+	const delegationCatalog = (states: AgentState[]) => {
+		const shown = states.slice(0, 20).map(state => {
+			const name = promptSummary(state.name, 64); const type = promptSummary(state.def.name, 64); const goal = promptSummary(state.goal, 180);
+			const task = promptSummary(state.task, 140);
+			const detail = state.status === "running" ? `; current task: ${task || "working"}; elapsed: ${Math.round(state.elapsed / 1000)}s`
+				: (state.status === "done" || state.status === "error") && task && state.task === task ? `; last task: ${task}` : "";
+			return `- name: ${name}; base type: ${type}; goal: ${goal}; status: ${state.status}${detail}`;
+		});
+		if (states.length > shown.length) shown.push(`(${states.length - shown.length} additional instances omitted to keep this catalog bounded.)`);
+		return shown.join("\n") || "(none)";
+	};
+	const delegationGuidance = "Consult status before delegation: steer a relevant running instance rather than starting duplicate work; choose an idle or done specialist for new work. Status is advisory—dispatch_agent and runtime remain authoritative.";
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (rootAgent) {
 			rootAgent.task = event.prompt; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens;
-			const catalog = [...agentStates.values()].filter(state => state !== rootAgent).map(state => `- ${state.name} (${state.def.name}): ${state.goal}`).join("\n") || "(none)";
-			return { systemPrompt: `${event.systemPrompt}\n\n# Root agent identity: ${rootAgent.name} (${rootAgent.def.name})\nGoal: ${rootAgent.goal}\n\n${rootAgent.def.systemPrompt}\n\nYou are the visible host assistant. Work directly with your enabled tools. You may delegate focused work with dispatch_agent to these instances:\n${catalog}\nNever dispatch yourself. Child results are private context; synthesize one coherent answer for the user.` };
+			const catalog = delegationCatalog([...agentStates.values()].filter(state => state !== rootAgent));
+			return { systemPrompt: `${event.systemPrompt}\n\n# Root agent identity: ${rootAgent.name} (${rootAgent.def.name})\nGoal: ${rootAgent.goal}\n\n${rootAgent.def.systemPrompt}\n\nYou are the visible host assistant. Work directly with your enabled tools. You may delegate focused work with dispatch_agent to these instances:\n${catalog}\n${delegationGuidance}\nNever dispatch yourself. Child results are private context; synthesize one coherent answer for the user.` };
 		}
-		const catalog = [...agentStates.values()].map(state => `- ${state.name} (${state.def.name}): ${state.goal}`).join("\n") || "(none)";
-		return { systemPrompt: `${event.systemPrompt}\n\nYou are a dispatcher. Delegate through dispatch_agent only. Dynamic instances:\n${catalog}\nDo not use codebase tools directly. Synthesize child results into one answer.` };
+		// With no instances there is nobody to dispatch to: leave the host prompt alone rather than
+		// telling it to delegate to an empty catalogue.
+		if (!agentStates.size) return;
+		const catalog = delegationCatalog([...agentStates.values()]);
+		return { systemPrompt: `${event.systemPrompt}\n\nYou are a dispatcher. Delegate through dispatch_agent only. Dynamic instances:\n${catalog}\n${delegationGuidance}\nDo not use codebase tools directly. Synthesize child results into one answer.` };
 	});
 	pi.on("model_select", (_event, ctx) => { for (const state of agentStates.values()) if (state.status !== "running") state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); updateWidget(); });
-	pi.on("agent_start", (_event, ctx) => { if (!rootAgent) return; clearInterval(rootAgent.timer); rootAgent.status = "running"; rootAgent.toolCount = 0; rootAgent.elapsed = 0; rootStartTime = Date.now(); rootAgent.timer = setInterval(() => { if (rootAgent) { rootAgent.elapsed = Date.now() - rootStartTime; updateWidget(); } }, 1000); rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); });
+	pi.on("agent_start", (_event, ctx) => { if (!rootAgent) return; clearInterval(rootAgent.timer); rootAgent.status = "running"; rootAgent.toolCount = 0; rootAgent.elapsed = 0; rootStartTime = Date.now(); rootAgent.timer = setInterval(() => { if (rootAgent) { rootAgent.elapsed = Date.now() - rootStartTime; updateWidget(); } }, FRAME_MS); rootAgent.timer.unref?.(); rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); syncStatus(ctx); });
 	pi.on("message_start", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("message_update", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("message_end", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
@@ -408,9 +598,18 @@ export default function (pi: ExtensionAPI) {
 			}));
 			agentAutocompleteInstalled = true;
 		}
-		widgetCtx = ctx; parentSessionId = ctx.sessionManager.getSessionId(); viewedAgent = undefined; loadAgents(ctx.cwd);
-		agentModelOverrides.clear(); const overrides = ctx.sessionManager.getEntries().filter((entry: any) => entry.type === "custom" && entry.customType === "agent-team-model-overrides").pop()?.data as { overrides?: Record<string, string> } | undefined; for (const [name, model] of Object.entries(overrides?.overrides ?? {})) agentModelOverrides.set(name, model);
-		restoreTeam(ctx); for (const state of agentStates.values()) state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); if (rootAgent) { const modelName = effectiveModel(rootAgent, ctx); const slash = modelName.indexOf("/"); const model = slash > 0 ? ctx.modelRegistry.find(modelName.slice(0, slash), modelName.slice(slash + 1)) : undefined; const restored = parentModel(ctx) === modelName || !!model && await pi.setModel(model); if (!restored) ctx.ui.notify(`ROOT ${rootAgent.name}: unable to restore model ${modelName}`, "warning"); pi.setActiveTools(rootTools(rootAgent)); ctx.ui.setStatus("agent-team", `Root: ${displayName(rootAgent.name)}${restored ? "" : " (model restore failed)"}`); } else pi.setActiveTools(TEAM_TOOLS); updateWidget();
-		ctx.ui.setFooter((_tui, theme) => ({ dispose() {}, invalidate() {}, render(width: number) { const model = ctx.model?.id || "no-model"; const usage = ctx.getContextUsage(); const pct = usage?.percent ?? 0; const left = theme.fg("dim", ` ${model}`) + theme.fg("muted", " · ") + theme.fg("accent", rootAgent ? `@${rootAgent.name}` : "dynamic team"); const right = theme.fg("dim", `[${"#".repeat(Math.round(pct / 10))}${"-".repeat(10 - Math.round(pct / 10))}] ${Math.round(pct)}% `); return [truncateToWidth(left + " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right))) + right, width)]; } }));
+		widgetCtx = ctx; parentSessionId = ctx.sessionManager.getSessionId(); viewedAgent = undefined; hostTools = []; rootModelRestored = true; loadAgents(ctx.cwd);
+		agentModelOverrides.clear(); const overrides = (ctx.sessionManager.getEntries() as any[]).filter(entry => entry.type === "custom" && entry.customType === "agent-team-model-overrides").pop()?.data as { overrides?: Record<string, string> } | undefined; for (const [name, model] of Object.entries(overrides?.overrides ?? {})) agentModelOverrides.set(name, model);
+		restoreTeam(ctx);
+		for (const state of agentStates.values()) state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx);
+		if (rootAgent) {
+			const modelName = effectiveModel(rootAgent, ctx); const slash = modelName.indexOf("/");
+			const model = slash > 0 ? ctx.modelRegistry.find(modelName.slice(0, slash), modelName.slice(slash + 1)) : undefined;
+			rootModelRestored = parentModel(ctx) === modelName || !!model && await pi.setModel(model);
+			if (!rootModelRestored) ctx.ui.notify(`ROOT ${rootAgent.name}: unable to restore model ${modelName}`, "warning");
+		}
+		applyActiveTools(); updateWidget(); syncStatus(ctx);
+		// No setFooter here: the footer belongs to whatever statusline the user configured
+		// (zentui owns it in this setup), and this extension reports through setStatus instead.
 	});
 }

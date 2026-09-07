@@ -1,27 +1,37 @@
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const require = createRequire(import.meta.url);
-const ponytailRoot = join(homedir(), ".pi", "agent", "npm", "node_modules", "@dietrichgebert", "ponytail");
-const {
-	DEFAULT_MODE,
-	RUNTIME_MODES,
-	getDefaultMode,
-	getQuietStartup,
-	getHideStatus,
-	normalizeMode,
-	normalizePersistedMode,
-	isDeactivationCommand,
-	writeDefaultMode,
-} = require(join(ponytailRoot, "hooks/ponytail-config.js"));
-const { getPonytailInstructions } = require(join(ponytailRoot, "hooks/ponytail-instructions.js"));
+const ponytailRoot = join(getAgentDir(), "npm", "node_modules", "@dietrichgebert", "ponytail");
 
-const runtimeModeList = RUNTIME_MODES.join("|");
-const commandDescription = `Set mode: ${runtimeModeList}. Commands: status, default <mode>`;
+/**
+ * Reaches into the package's internal files, so a version bump can move them. Loading it must
+ * therefore fail soft: agent-team.ts passes this file to every child agent with --extension,
+ * and a throw here would stop the whole team from starting rather than just disabling ponytail.
+ */
+let config: any;
+let instructions: any;
+let loadError: string | undefined;
+try {
+	config = require(join(ponytailRoot, "hooks/ponytail-config.js"));
+	instructions = require(join(ponytailRoot, "hooks/ponytail-instructions.js"));
+} catch (error) {
+	loadError = error instanceof Error ? error.message : String(error);
+}
 
 export default function ponytailExtension(pi: ExtensionAPI) {
+	if (!config || !instructions) {
+		pi.on("session_start", async (_event, ctx) => ctx.ui.notify(`Ponytail unavailable: ${loadError}`, "warning"));
+		return;
+	}
+	const {
+		DEFAULT_MODE, RUNTIME_MODES, getDefaultMode, getQuietStartup, getHideStatus,
+		normalizeMode, normalizePersistedMode, isDeactivationCommand, writeDefaultMode,
+	} = config;
+	const { getPonytailInstructions } = instructions;
+	const commandDescription = `Set mode: ${RUNTIME_MODES.join("|")}. Commands: status, default <mode>`;
+
 	let currentMode = DEFAULT_MODE;
 	let configuredDefaultMode = getDefaultMode();
 	let hideStatus = getHideStatus();
@@ -85,7 +95,7 @@ export default function ponytailExtension(pi: ExtensionAPI) {
 		const entries = ctx.sessionManager.getBranch?.() || ctx.sessionManager.getEntries?.() || [];
 		configuredDefaultMode = getDefaultMode();
 		hideStatus = getHideStatus();
-		currentMode = [...entries].reverse().find((entry: any) => entry?.type === "custom" && entry?.customType === "ponytail-mode")?.data?.mode || configuredDefaultMode;
+		currentMode = ([...entries] as any[]).reverse().find(entry => entry?.type === "custom" && entry?.customType === "ponytail-mode")?.data?.mode || configuredDefaultMode;
 		syncStatus(ctx);
 		if (!getQuietStartup()) ctx.ui.notify(`Ponytail loaded: ${currentMode}`, "info");
 	});

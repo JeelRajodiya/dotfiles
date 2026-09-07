@@ -25,7 +25,7 @@
   "packages": [
     "npm:pi-web-access",
     {
-      "source": "npm:@dietrichgebert/ponytail",
+      "source": "npm:@dietrichgebert/ponytail@4.9.0",
       "extensions": []
     },
     "./packages/pi-zentui",
