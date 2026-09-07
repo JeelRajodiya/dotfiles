@@ -1,7 +1,12 @@
 {
   "components": {
     "editor": {
-      "style": "minimalist"
+      "style": "minimalist",
+      "styles": {
+        "minimalist": {
+          "contextFormat": "tokens"
+        }
+      }
     },
     "footer": {
       "style": "starship",
@@ -14,6 +19,7 @@
             "gitCounts": false,
             "gitCommit": false,
             "gitMetrics": false,
+            "context": false,
             "tokens": false,
             "cost": false
           },
@@ -21,7 +27,7 @@
             "defaultPlacement": "left",
             "placements": {
               "codex-usage": "right",
-              "monthly-cost": "right"
+              "monthly-cost": "off"
             },
             "colorModes": {
               "active-workflow": "original",

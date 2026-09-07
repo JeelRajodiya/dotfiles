@@ -48,7 +48,7 @@ export type WorkingLineSpinner =
 export type WorkingLineTextAnimation = "classic" | "kitt" | "disabled";
 export type ComponentStyleOwner = "editor" | "userMessages" | "selectorBorders" | "footer";
 export type MinimalistPathDisplayMode = "compact" | "project" | "full";
-export type MinimalistContextFormat = "percent" | "percent-total";
+export type MinimalistContextFormat = "percent" | "percent-total" | "tokens";
 export type EditorBorderColorMode = "static" | "adaptive";
 export type CompletionMenuStyle = "native" | "palette";
 export type CompactFooterMaxLines = 1 | 2 | 3 | "unlimited";
@@ -1266,7 +1266,9 @@ function resolveComponents(config: ConfigRecord): ComponentsConfig {
 							? minimalist.pathDisplay
 							: defaultMinimalistStyle.pathDisplay,
 					contextFormat:
-						minimalist.contextFormat === "percent" || minimalist.contextFormat === "percent-total"
+						minimalist.contextFormat === "percent" ||
+						minimalist.contextFormat === "percent-total" ||
+						minimalist.contextFormat === "tokens"
 							? minimalist.contextFormat
 							: defaultMinimalistStyle.contextFormat,
 					contextGauge: parseBoolean(minimalist.contextGauge, defaultMinimalistStyle.contextGauge),

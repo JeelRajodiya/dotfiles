@@ -298,6 +298,8 @@ export default function (pi: ExtensionAPI) {
 	);
 	const getContextWindow = (ctx: ExtensionContext): number | undefined =>
 		ctx.model?.contextWindow ?? ctx.getContextUsage()?.contextWindow;
+	const getContextTokens = (ctx: ExtensionContext): number | undefined =>
+		liveContext.get()?.tokens ?? ctx.getContextUsage()?.tokens;
 	const getContextPercent = (ctx: ExtensionContext): number | undefined => {
 		const usage = ctx.getContextUsage();
 		const contextWindow = getContextWindow(ctx);
@@ -705,9 +707,11 @@ export default function (pi: ExtensionAPI) {
 						ahead: state.ahead,
 						behind: state.behind,
 						costLabel: state.costLabel,
+						monthlyCostLabel: getActiveExtensionStatuses().get("monthly-cost"),
 						modelLabel: modelLabelFor(state, currentConfig.components.editor.modelLabel),
 						thinkingLevel: getThinkingLevel(),
 						contextPercent: getContextPercent(ctx),
+						contextTokens: getContextTokens(ctx),
 						contextWindow: getContextWindow(ctx),
 						sessionName: ctx.sessionManager.getSessionName() ?? "",
 						agentDurationMs: getAgentDurationMs(),
@@ -750,9 +754,11 @@ export default function (pi: ExtensionAPI) {
 						ahead: state.ahead,
 						behind: state.behind,
 						costLabel: state.costLabel,
+						monthlyCostLabel: getActiveExtensionStatuses().get("monthly-cost"),
 						modelLabel: modelLabelFor(state, currentConfig.components.editor.modelLabel),
 						thinkingLevel: getThinkingLevel(),
 						contextPercent: getContextPercent(ctx),
+						contextTokens: getContextTokens(ctx),
 						contextWindow: getContextWindow(ctx),
 						sessionName: ctx.sessionManager.getSessionName() ?? "",
 						agentDurationMs: getAgentDurationMs(),

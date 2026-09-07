@@ -105,7 +105,7 @@ const footerStyleValues = Object.values(footerStyleLabels);
 const completionMenuValues: CompletionMenuStyle[] = ["palette", "native"];
 const accentRailSurfaceValues = ["filled", "transparent"];
 const minimalistPathDisplayValues = ["compact", "project", "full"];
-const minimalistContextFormatValues = ["percent", "percent-total"];
+const minimalistContextFormatValues = ["percent", "percent-total", "tokens"];
 const editorBorderColorModeValues: EditorBorderColorMode[] = ["static", "adaptive"];
 const compactFooterMaxLineValues = ["1", "2", "3", "unlimited"];
 const featureStateValues: FeatureState[] = ["enabled", "disabled"];
@@ -542,7 +542,7 @@ function buildMinimalistEditorStyleItems(config: PolishedTuiConfig): SettingItem
 		{
 			id: "minimalistContextFormat",
 			label: "Context text",
-			description: "Show percent alone or with total context.",
+			description: "Show percent, percent with total, or used/total tokens.",
 			currentValue: minimalist.contextFormat,
 			values: minimalistContextFormatValues,
 		},

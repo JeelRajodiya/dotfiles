@@ -44,9 +44,11 @@ export type MinimalistEditorMetadata = {
 	ahead?: number;
 	behind?: number;
 	costLabel?: string;
+	monthlyCostLabel?: string;
 	modelLabel?: string;
 	thinkingLevel?: string;
 	contextPercent?: number;
+	contextTokens?: number;
 	contextWindow?: number;
 	sessionName?: string;
 	agentDurationMs?: number;
@@ -185,7 +187,10 @@ function renderTopRight(
 		? sanitizeEditorMetadataText(metadata.costLabel ?? "")
 		: "";
 	if (cost) {
-		parts.push(renderStyleForSource(uiTheme, source, config.colors.cost, cost));
+		const monthly = sanitizeEditorMetadataText(metadata.monthlyCostLabel ?? "")
+			.replace(" (this month)", "");
+		const label = monthly ? `${cost} (${monthly} mo)` : cost;
+		parts.push(renderStyleForSource(uiTheme, source, config.colors.cost, label));
 	}
 	if (metadata.contextPercent !== undefined && Number.isFinite(metadata.contextPercent)) {
 		const percent = Math.round(Math.max(0, Math.min(999, metadata.contextPercent)));
@@ -199,14 +204,19 @@ function renderTopRight(
 				: tier === "warning"
 					? config.colors.contextWarning
 					: config.colors.contextNormal;
-		const total =
-			config.components.editor.styles.minimalist.contextFormat === "percent-total" &&
+		const hasWindow =
 			metadata.contextWindow !== undefined &&
 			Number.isFinite(metadata.contextWindow) &&
-			metadata.contextWindow > 0
-				? `/${formatCount(metadata.contextWindow)}`
-				: "";
-		const text = `${percent}%${total}`;
+			metadata.contextWindow > 0;
+		const total = config.components.editor.styles.minimalist.contextFormat === "percent-total" && hasWindow
+			? `/${formatCount(metadata.contextWindow!)}`
+			: "";
+		const usedTokens = Number.isFinite(metadata.contextTokens)
+			? metadata.contextTokens!
+			: metadata.contextWindow! * percent / 100;
+		const text = config.components.editor.styles.minimalist.contextFormat === "tokens" && hasWindow
+			? `(${formatCount(usedTokens)}/${formatCount(metadata.contextWindow!)})`
+			: `${percent}%${total}`;
 		let context = renderStyleForSource(uiTheme, source, style, text);
 		if (config.components.editor.styles.minimalist.contextGauge) {
 			for (const gaugeWidth of [5, 3]) {
