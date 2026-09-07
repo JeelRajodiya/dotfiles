@@ -16,6 +16,8 @@ export function rootTools(hostTools: string[], teamTools: string[]): string[] {
 	return [...new Set([...hostTools, ...teamTools])];
 }
 
+export const AGENT_VIEW_COMMAND = "view";
+export const isAgentViewCommand = (command: string): boolean => command === AGENT_VIEW_COMMAND;
 export type TokenCounts = { input: number; output: number };
 export type AgentCompletionStatus = "done" | "error";
 

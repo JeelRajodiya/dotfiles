@@ -9,11 +9,11 @@
  * deltas extend the entry already there.
  */
 
-export type ActivityKind = "user" | "assistant" | "tool-start" | "tool-done" | "tool-error";
-export interface ActivityEntry { kind: ActivityKind; text: string }
+export type ActivityKind = "user" | "assistant" | "thought" | "tool-start" | "tool-done" | "tool-error";
+export interface ActivityEntry { kind: ActivityKind; text: string; startedAt?: number; finishedAt?: number }
 
-const KINDS = new Set<string>(["user", "assistant", "tool-start", "tool-done", "tool-error"]);
-const LINE = /^(user|assistant|tool-start|tool-done|tool-error):\s*([\s\S]*)$/i;
+const KINDS = new Set<string>(["user", "assistant", "thought", "tool-start", "tool-done", "tool-error"]);
+const LINE = /^(user|assistant|thought|tool-start|tool-done|tool-error):\s*([\s\S]*)$/i;
 
 /** Strip ANSI and control characters, collapse whitespace. Terminal output is not trusted here. */
 export const cleanActivity = (value: unknown): string =>
@@ -22,6 +22,17 @@ export const cleanActivity = (value: unknown): string =>
 		.replace(/[\x00-\x1F\x7F]/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
+
+export function formatActivityDuration(durationMs: number): string {
+	const seconds = Math.max(0, Math.floor(durationMs / 1000));
+	const minutes = Math.floor(seconds / 60);
+	return minutes ? `${minutes}m${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
+}
+
+export function thoughtActivityLabel(entry: ActivityEntry, now = Date.now()): string {
+	const duration = Math.max(0, (entry.finishedAt ?? now) - (entry.startedAt ?? now));
+	return `${entry.finishedAt ? "Thought" : "Thinking"} (${formatActivityDuration(duration)})${entry.text ? ` — ${entry.text}` : ""}`;
+}
 
 export class ActivityLog {
 	private entries: ActivityEntry[] = [];
@@ -40,12 +51,34 @@ export class ActivityLog {
 		const text = cleanActivity(value);
 		if (!text || /^[{[]/.test(text)) return;
 		const last = this.entries.at(-1);
-		if (kind === "assistant" && last?.kind === "assistant") {
+		if ((kind === "assistant" || kind === "thought") && last?.kind === kind && !last.finishedAt) {
 			last.text = this.clamp(`${last.text} ${text}`.replace(/\s+/g, " "));
 			return;
 		}
 		this.entries.push({ kind, text: this.clamp(text) });
 		if (this.entries.length > this.maxEntries) this.entries.splice(0, this.entries.length - this.maxEntries);
+	}
+
+	startThought(now = Date.now()): void {
+		const last = this.entries.at(-1);
+		if (last?.kind === "thought" && !last.finishedAt) return;
+		this.entries.push({ kind: "thought", text: "", startedAt: now });
+		if (this.entries.length > this.maxEntries) this.entries.splice(0, this.entries.length - this.maxEntries);
+	}
+
+	appendThought(value: unknown): void {
+		const text = cleanActivity(value);
+		if (!text) return;
+		const last = this.entries.at(-1);
+		if (last?.kind !== "thought" || last.finishedAt) this.startThought();
+		const thought = this.entries.at(-1)!;
+		thought.text = this.clamp(`${thought.text} ${text}`.replace(/\s+/g, " ").trim());
+	}
+
+	finishThought(value: unknown, now = Date.now()): void {
+		this.appendThought(value);
+		const thought = this.entries.at(-1);
+		if (thought?.kind === "thought") thought.finishedAt = now;
 	}
 
 	/** Rebuild from the `kind: text` lines that latestChildActivity() recovers from a session file. */

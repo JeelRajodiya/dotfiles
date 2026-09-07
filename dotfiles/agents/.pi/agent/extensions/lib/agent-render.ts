@@ -4,7 +4,7 @@
  */
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatAgentContext, formatAgentTokens, type TokenCounts } from "../agent-team-helpers";
-import type { ActivityEntry } from "./agent-activity";
+import { thoughtActivityLabel, type ActivityEntry } from "./agent-activity";
 
 export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
 
@@ -32,8 +32,8 @@ export const FRAME_MS = 80;
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const STATUS_ICON: Record<string, string> = { waiting: "↗", done: "✓", error: "✗", idle: "○" };
 const STATUS_COLOR: Record<string, string> = { running: "accent", waiting: "warning", done: "success", error: "error", idle: "dim" };
-const ACTIVITY_GLYPH: Record<string, string> = { user: "▸", assistant: "·", "tool-start": "◆", "tool-done": "✓", "tool-error": "✗" };
-const ACTIVITY_COLOR: Record<string, string> = { user: "accent", assistant: "text", "tool-start": "dim", "tool-done": "success", "tool-error": "error" };
+const ACTIVITY_GLYPH: Record<string, string> = { user: "▸", assistant: "·", thought: "·", "tool-start": "◆", "tool-done": "✓", "tool-error": "✗" };
+const ACTIVITY_COLOR: Record<string, string> = { user: "accent", assistant: "text", thought: "muted", "tool-start": "dim", "tool-done": "success", "tool-error": "error" };
 
 type Theme = { fg(color: string, text: string): string; bold(text: string): string };
 
@@ -129,7 +129,7 @@ export interface DetailOptions {
 	steerable: boolean;
 }
 
-/** The expanded single-agent view behind `/agents detail <name>`, where prose has room. */
+/** The expanded single-agent view behind `/agents view <name>`, where prose has room. */
 export function renderDetail(agent: RenderableAgent, width: number, theme: Theme, options: DetailOptions, now?: number): string {
 	const line = (value: string) => truncateToWidth(value, width);
 	const indent = (value: string) => truncateToWidth(`  ${value}`, width);
@@ -144,7 +144,7 @@ export function renderDetail(agent: RenderableAgent, width: number, theme: Theme
 
 	const activity = options.activity.map(entry => truncateToWidth(
 		`  ${theme.fg(ACTIVITY_COLOR[entry.kind] ?? "muted", ACTIVITY_GLYPH[entry.kind] ?? "·")} ` +
-		theme.fg(entry.kind === "assistant" ? "text" : "muted", entry.text),
+		theme.fg(entry.kind === "assistant" ? "text" : "muted", entry.kind === "thought" ? thoughtActivityLabel(entry, now) : entry.text),
 		width,
 	));
 

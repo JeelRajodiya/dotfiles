@@ -7,8 +7,8 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
-	addTokenCounts, AgentRpcTransport, childSessionPath, contextTokensFromUsage, encodeCwd,
-	formatToolActivity, latestAssistantContextTokens, latestChildActivity, pruneSessionDirs, resultDeliveryStatus, rootTools, sessionTokenCounts, shouldFinalizeAgentEvent, terminateChild, type AgentCompletionStatus, type TokenCounts,
+	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, childSessionPath, contextTokensFromUsage, encodeCwd,
+	formatToolActivity, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity, pruneSessionDirs, resultDeliveryStatus, rootTools, sessionTokenCounts, shouldFinalizeAgentEvent, terminateChild, type AgentCompletionStatus, type TokenCounts,
 } from "./agent-team-helpers";
 import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity";
 import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs";
@@ -299,7 +299,7 @@ export default function (pi: ExtensionAPI) {
 		const childExtensions = ["openai-codex-fast.ts", "ponytail.ts"]
 			.map(name => join(getAgentDir(), "extensions", name)).filter(existsSync)
 			.flatMap(path => ["--extension", path]);
-		const args = ["--mode", "rpc", "--no-extensions", ...childExtensions, "--model", effectiveModel(state, ctx), "--tools", state.def.tools, "--thinking", "off", "--append-system-prompt", `${state.def.systemPrompt}\n\n# Assigned goal\n${state.goal}`, "--session", file];
+		const args = ["--mode", "rpc", "--no-extensions", ...childExtensions, "--model", effectiveModel(state, ctx), "--tools", state.def.tools, "--thinking", ctx.thinkingLevel ?? "off", "--append-system-prompt", `${state.def.systemPrompt}\n\n# Assigned goal\n${state.goal}`, "--session", file];
 		if (state.sessionFile) args.push("-c");
 		const child = spawn(process.env.PI_BIN || "pi", args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } }); const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
 		const run: ActiveAgentRun = { child, transport, text: new TextTail(), stderrChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, output: new OutputBuffer(), toolStarts: new Map() }; state.activeRun = run; updateWidget();
@@ -316,6 +316,9 @@ export default function (pi: ExtensionAPI) {
 			state.lastWork = run.text.lastLine;
 			appendActivity("assistant", delta);
 		};
+		const onThinkingStart = () => state.activity.startThought();
+		const onThinkingDelta = (event: any) => state.activity.appendThought(event.assistantMessageEvent.delta);
+		const onThinkingEnd = (event: any) => state.activity.finishThought(event.assistantMessageEvent.content);
 		const onToolStart = (event: any) => {
 			state.toolCount++;
 			const id = event.toolCallId ?? event.id ?? `${event.toolName}:${state.toolCount}`;
@@ -348,9 +351,15 @@ export default function (pi: ExtensionAPI) {
 		const handle = (event: any) => {
 			if (transport.handle(event)) return;
 			switch (event.type) {
-				case "message_update":
-					if (event.assistantMessageEvent?.type !== "text_delta") return;
-					onTextDelta(event); break;
+				case "message_update": {
+					const type = event.assistantMessageEvent?.type;
+					if (type === "text_delta") onTextDelta(event);
+					else if (type === "thinking_start") onThinkingStart();
+					else if (type === "thinking_delta") onThinkingDelta(event);
+					else if (type === "thinking_end") onThinkingEnd(event);
+					else return;
+					break;
+				}
 				case "tool_execution_start": onToolStart(event); break;
 				case "tool_execution_end": onToolEnd(event); break;
 				case "message_end": onMessageEnd(event); break;
@@ -417,7 +426,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.registerTool({ name: "set_agent_model", label: "Set Agent Model", description: "Set a session model for a named dynamic instance.", parameters: Type.Object({ agent: Type.String(), model: Type.String() }), async execute(_id, params, _signal, _update, ctx) { const { agent, model } = params as { agent: string; model: string }; const state = stateFor(agent); if (!state) throw new Error(`Unknown dynamic instance "${agent}"`); if (state === rootAgent) throw new Error("Change the root model with /agents model <name> <model|inherit> when the host is idle"); return { content: [{ type: "text", text: `${state.name}: ${setInstanceModel(state, model, ctx)}` }], details: { agent: state.name } }; } });
 
-	const usage = "Usage: /agents add <type|custom> [name] | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | detail <name> | exit | grid <1-6> | team <team-name|off>";
+	const usage = "Usage: /agents add <type|custom> [name] | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | view <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
 	async function activateTeam(teamName: string | undefined, ctx: any) {
@@ -444,7 +453,7 @@ export default function (pi: ExtensionAPI) {
 			const matches = choices.filter(value => value.toLowerCase().startsWith(current.toLowerCase())).map(value => ({ value: `${base}${value}`, label: value }));
 			return matches.length ? matches : null;
 		};
-		if (!command || parts.length === 1 && !trailing) return values(["add", "remove", "compact", "promote", "list", "model", "detail", "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
+		if (!command || parts.length === 1 && !trailing) return values(["add", "remove", "compact", "promote", "list", "model", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
 		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...predefinedDefs().map(def => def.name), "custom"], "add ").map(item => item.label === "custom" ? { ...item, label: "Custom…" } : item);
 		if (command === "remove" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running").map(state => state.name), "remove ");
 		if (command === "compact" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent).map(state => state.name), "compact ");
@@ -457,7 +466,7 @@ export default function (pi: ExtensionAPI) {
 			const choices = [...instances, ...bases];
 			return choices.length ? choices : null;
 		}
-		if (command === "detail" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].map(state => state.name), "detail ");
+		if (isAgentViewCommand(command) && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].map(state => state.name), `${AGENT_VIEW_COMMAND} `);
 		if (command === "model" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].map(state => state.name), "model ");
 		if (command === "model" && parts.length === 2 && trailing || command === "model" && parts.length === 3 && !trailing) return values(["inherit", ...availableModels()], `model ${parts[1]} `);
 		if (command === "grid" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(["1", "2", "3", "4", "5", "6"], "grid ");
@@ -499,8 +508,8 @@ export default function (pi: ExtensionAPI) {
 				try { let target = state; if (target === rootAgent) { await ctx.waitForIdle(); target = stateFor(instance)!; if (target !== rootAgent) throw new Error("Root changed while waiting for host idle"); ctx.ui.notify(`ROOT ${target.name}: ${await setRootModel(target, requested, ctx)}`, "info"); } else ctx.ui.notify(`${target.name}: ${setInstanceModel(target, requested, ctx)}`, "info"); } catch (error) { fail(error); }
 				return;
 			}
-			if (command === "detail") { const state = stateFor(name); if (!state) return void ctx.ui.notify("Usage: /agents detail <name>", "error"); viewedAgent = state; updateWidget(); syncStatus(ctx); return; }
-			if (command === "exit") { if (rest.length || !viewedAgent) return void ctx.ui.notify("No detail view is open.", "warning"); viewedAgent = undefined; updateWidget(); syncStatus(ctx); return; }
+			if (isAgentViewCommand(command)) { const state = stateFor(name); if (!state) return void ctx.ui.notify(`Usage: /agents ${AGENT_VIEW_COMMAND} <name>`, "error"); viewedAgent = state; updateWidget(); syncStatus(ctx); return; }
+			if (command === "exit") { if (rest.length || !viewedAgent) return void ctx.ui.notify("No agent view is open.", "warning"); viewedAgent = undefined; updateWidget(); syncStatus(ctx); return; }
 			if (command === "team") {
 				const selected = Object.keys(teams).find(team => key(team) === key(rest[0] || ""));
 				if (rest.length !== 1 || rest[0] !== "off" && !selected) return void ctx.ui.notify("Usage: /agents team <team-name|off>", "error");
