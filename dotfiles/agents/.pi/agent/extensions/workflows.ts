@@ -4,31 +4,51 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
-type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-type WorkflowName =
-	| "iterate"
-	| "iterate-fast"
-	| "understand"
-	| "understand-fast"
-	| "understand-thorough";
+type WorkflowName = "iterate" | "understand";
 
 interface Workflow {
 	description: string;
-	model: string;
-	thinkingLevel: ThinkingLevel;
 	tools: string[];
 	instructions: string;
 }
 
 const IMPLEMENTATION_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const INVESTIGATION_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
-const READ_ONLY_TOOLS = ["read", "bash", "grep", "find", "ls"];
+
+const UNDERSTAND_ROLE_INSTRUCTIONS = `## Purpose
+
+Help the user understand the codebase, provide a detailed implementation plan when asked, and review changes when asked. Any Iterate agent can implement the plan or review fixes; Understand does not implement them. Preserve the relevant conversation context across explanation, planning, and review.
+
+## When asked to review changes
+
+Review the requested diff or changes against the user's requirements, agreed plan, decisions, and acceptance criteria from the conversation. If no plan exists, review against the stated request and existing behavior; do not invent requirements. Clarify the review scope if it is ambiguous.
+
+Inspect the actual changes and enough surrounding code, affected callers, and tests to verify their impact. Look for correctness bugs, regressions, missed requirements, security issues, and meaningful test gaps. Run only focused, non-destructive checks when useful, and distinguish verified results from untested assumptions. Do not modify files or apply fixes during review.
+
+Lead with actionable findings ordered by severity. For each finding, include a literal file:line reference, the triggering scenario, why it matters, and a concrete correction that any Iterate agent can implement. Avoid speculative findings, unrelated refactoring, and style-only complaints. Follow with open questions, plan/acceptance-criteria gaps, and checks performed or not run. If no actionable findings remain, say so explicitly and state any verification limits; do not claim untested changes are proven correct.
+
+This review format takes precedence over the default explanation/example format. Return the review in the conversation; do not create an investigation file unless separately requested.`;
+
+const IMPLEMENTATION_PLAN_INSTRUCTIONS = `## When asked for an implementation plan
+
+Return a detailed, self-contained Markdown handoff for the Iterate workflow using a cheaper LLM, not a short outline. This planning format takes precedence over the default explanation format and brevity preferences. Plan only; do not implement changes or switch workflows. Return the complete plan in the conversation without creating a plan file.
+
+Use the relevant conversation so far, not just the latest message. Carry forward the user's goal, constraints, agreed decisions and their reasons, rejected approaches, and relevant findings. Honor later corrections; do not reopen settled decisions. Include the context the implementer needs even if it will not receive this conversation; never rely on "as discussed above."
+
+Inspect the code, affected callers, existing helpers, and focused test/configuration files needed to make the plan concrete. Reuse confirmed findings rather than repeating broad investigation. Verify paths and symbols; distinguish existing code from proposed additions and facts from assumptions. Resolve code questions yourself where possible. Ask the user clarifying questions whenever needed to confirm requirements, resolve ambiguity, or choose between meaningful trade-offs; do not guess or reopen decisions already settled in the conversation. If answers materially affect the implementation, ask before finalizing the plan. Do not present a blocked plan as ready to execute.
+
+Use these sections:
+1. Goal and conversation context: requested behavior, relevant decisions, constraints, non-goals, and current implementation state, including any work already completed.
+2. Verified code map: relevant repository-relative paths, symbols, current file:line references, existing behavior, and reusable patterns. Include only the flow needed for this change.
+3. Ordered implementation steps: small dependency-ordered tasks. For each, name the exact file and symbol to create/change, describe the concrete edit and intended behavior, name helpers/imports/types and affected callers, and give a local completion check. Include precise snippets or pseudocode where prose would leave logic ambiguous. Specify applicable edge cases, error handling, interfaces, and data/configuration changes. Avoid vague tasks such as "update the logic" or asking Iterate to design the solution.
+4. Verification: exact focused commands with working directories and prerequisites, test files and cases to add/update, and expected results. Separate checks already run and their actual results from checks the implementer must run; never invent passing results.
+5. Completion checklist and handoff: observable acceptance criteria, remaining assumptions/blockers (or none), and instructions to implement in order, preserve unrelated work, avoid broad rediscovery or redesign, and stop for clarification if actual code contradicts the plan.
+
+Choose one concrete approach consistent with the conversation. Include enough detail for direct execution without unnecessary background, speculative features, or unrelated refactoring. Before responding, check that the handoff stands alone and leaves no hidden design decisions for the cheaper model.`;
 
 const workflows: Record<WorkflowName, Workflow> = {
 	iterate: {
 		description: "Implement and verify a focused codebase change",
-		model: "gpt-5.6-terra",
-		thinkingLevel: "medium",
 		tools: IMPLEMENTATION_TOOLS,
 		instructions: `You are Iterate, a codebase implementation agent.
 
@@ -44,57 +64,20 @@ Do not produce a plan, perform exploratory repository searches, or read unrelate
 
 Keep progress updates brief and factual. In the final response, summarize the implemented behavior and verification performed.`,
 	},
-	"iterate-fast": {
-		description: "Make a small targeted code change quickly",
-		model: "gpt-5.6-luna",
-		thinkingLevel: "medium",
-		tools: IMPLEMENTATION_TOOLS,
-		instructions: `You are Iterate Fast, a targeted code editing agent.
-
-Make small requested changes in specific files quickly. Read only the context needed to make the change safely, apply the smallest direct patch, and stop. Do not broaden the scope, add speculative abstractions, or modify unrelated code.
-
-Do not run tests, builds, linters, formatters, or repeated verification unless the user explicitly asks. If a critical ambiguity prevents a safe edit, ask one short question instead of investigating broadly.
-
-Preserve unrelated worktree changes and never revert work you did not create. Keep progress updates minimal and state the changed files briefly in the final response.`,
-	},
 	understand: {
-		description: "Explain code behavior with examples and exact code paths",
-		model: "gpt-5.6-terra",
-		thinkingLevel: "medium",
+		description: "Explain code, plan implementation, and review changes on request",
 		tools: INVESTIGATION_TOOLS,
-		instructions: `You are Understand, a codebase explanation agent.
+		instructions: `You are Understand, a codebase explanation, planning, and review agent.
+
+${UNDERSTAND_ROLE_INSTRUCTIONS}
+
+${IMPLEMENTATION_PLAN_INSTRUCTIONS}
 
 Help the user understand unfamiliar code in simple language without losing technical accuracy. Start with the smallest concrete example that makes the behavior visible. Explain the input, relevant value or type, handler, important transformations, and final output or state, then connect the example to the repository code.
 
 For questions about code flow, call chains, dependencies, or what invokes what, use the show-chain skill faithfully. Produce one ordered, exact file:line chain and one investigation Markdown file. Lead with confirmed behavior and clearly label runtime-unverified assumptions. If a requested symbol or path is absent, say so directly.
 
 Do not modify implementation or test files. Only investigation Markdown files may be created or updated. Do not propose or implement fixes unless the user explicitly asks. Keep the final explanation focused, friendly, and easy to follow.`,
-	},
-	"understand-fast": {
-		description: "Answer a small codebase question quickly",
-		model: "gpt-5.6-luna",
-		thinkingLevel: "medium",
-		tools: READ_ONLY_TOOLS,
-		instructions: `You are Understand Fast, a codebase explanation agent.
-
-Answer the user's question directly and simply without losing technical accuracy. Read relevant code only when needed. Do not investigate broadly, trace call chains, use the show-chain skill, create investigation files, or add diagrams unless the user explicitly requests a detailed trace.
-
-When useful, start with the smallest concrete example, explain its input, relevant value or type, handling code, important transformation, and final output or state, then connect it to repository code. Make empty values, nulls, boundaries, and state transitions explicit when they matter.
-
-Lead with confirmed behavior. Clearly label runtime-unverified assumptions. If a requested symbol or path is absent, say so directly. Do not modify files or propose fixes unless explicitly asked. Keep the final explanation focused, friendly, and easy to follow.`,
-	},
-	"understand-thorough": {
-		description: "Trace and explain code behavior thoroughly",
-		model: "gpt-5.6-sol",
-		thinkingLevel: "medium",
-		tools: INVESTIGATION_TOOLS,
-		instructions: `You are Understand Thorough, a codebase explanation agent.
-
-Help the user understand unfamiliar code in simple language without losing technical accuracy. Start with the smallest concrete example that makes behavior visible, explain it piece by piece, and then connect it to the real repository code.
-
-For code flow, call-chain, dependency, or invocation questions, use the show-chain skill faithfully. Trace the real execution order with literal file:line references, use a numbered file:line spine, add a small Mermaid diagram for branches, loops, or chains longer than about four hops, and save one clearly named investigation Markdown file. End it with two to four one-sentence key takeaways. After the exact trace, explain the same flow in plain language with a small step-by-step example.
-
-Lead with confirmed behavior and clearly label runtime-unverified assumptions. If a requested symbol or path is absent, say so directly. Do not modify implementation or test files; only investigation Markdown files may be created or updated. Do not propose or implement fixes unless explicitly asked.`,
 	},
 };
 
@@ -103,9 +86,6 @@ function isWorkflowName(value: string): value is WorkflowName {
 }
 
 interface DefaultState {
-	provider?: string;
-	model?: string;
-	thinkingLevel: ThinkingLevel;
 	tools: string[];
 }
 
@@ -113,30 +93,15 @@ export default function workflowExtension(pi: ExtensionAPI) {
 	let activeWorkflowName: WorkflowName | undefined;
 	let defaultState: DefaultState | undefined;
 
-	function snapshot(ctx: ExtensionContext): DefaultState {
+	function snapshot(): DefaultState {
 		return {
-			provider: ctx.model?.provider,
-			model: ctx.model?.id,
-			thinkingLevel: pi.getThinkingLevel(),
 			tools: pi.getActiveTools(),
 		};
 	}
 
 	async function activate(name: WorkflowName, ctx: ExtensionContext, persist = true): Promise<boolean> {
 		const workflow = workflows[name];
-		const model = ctx.modelRegistry.find("openai-codex", workflow.model);
-		if (!model) {
-			ctx.ui.notify(`Workflow ${name}: model openai-codex/${workflow.model} not found`, "error");
-			return false;
-		}
-		const previous = defaultState ?? snapshot(ctx);
-		if (!(await pi.setModel(model))) {
-			ctx.ui.notify(`Workflow ${name}: OpenAI Codex authentication is unavailable`, "error");
-			return false;
-		}
-
-		defaultState = previous;
-		pi.setThinkingLevel(workflow.thinkingLevel);
+		defaultState ??= snapshot();
 		const availableTools = new Set(pi.getAllTools().map((tool) => tool.name));
 		pi.setActiveTools(workflow.tools.filter((tool) => availableTools.has(tool)));
 		activeWorkflowName = name;
@@ -182,14 +147,6 @@ export default function workflowExtension(pi: ExtensionAPI) {
 					return;
 				}
 				if (defaultState) {
-					if (defaultState.provider && defaultState.model) {
-						const model = ctx.modelRegistry.find(defaultState.provider, defaultState.model);
-						if (!model || !(await pi.setModel(model))) {
-							ctx.ui.notify("Cannot restore the previous model; check its availability and authentication", "error");
-							return;
-						}
-					}
-					pi.setThinkingLevel(defaultState.thinkingLevel);
 					const available = new Set(pi.getAllTools().map(tool => tool.name));
 					pi.setActiveTools(defaultState.tools.filter(tool => available.has(tool)));
 				}
@@ -216,7 +173,7 @@ export default function workflowExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", (event) => {
-		if (activeWorkflowName !== "understand" && activeWorkflowName !== "understand-thorough") return;
+		if (activeWorkflowName !== "understand") return;
 		if (event.toolName !== "edit" && event.toolName !== "write") return;
 
 		const path = (event.input as { path?: unknown }).path;
@@ -232,19 +189,18 @@ export default function workflowExtension(pi: ExtensionAPI) {
 		const state = ctx.sessionManager
 			.getEntries()
 			.filter(
-				(entry): entry is typeof entry & { data: { name: WorkflowName | "default"; defaultState?: DefaultState } } =>
+				(entry): entry is typeof entry & { data: { name: string; defaultState?: DefaultState } } =>
 					entry.type === "custom" &&
 					entry.customType === "workflow-state" &&
-					typeof (entry.data as { name?: unknown } | undefined)?.name === "string" &&
-					((entry.data as { name: string }).name === "default" || isWorkflowName((entry.data as { name: string }).name)),
+					typeof (entry.data as { name?: unknown } | undefined)?.name === "string",
 			)
 			.pop();
 
 		activeWorkflowName = undefined;
 		defaultState = undefined;
-		if (state && state.data.name !== "default") {
+		if (state && isWorkflowName(state.data.name)) {
 			// Older sessions did not save their pre-workflow settings; use startup settings.
-			defaultState = state.data.defaultState ?? snapshot(ctx);
+			defaultState = state.data.defaultState ?? snapshot();
 			await activate(state.data.name, ctx, false);
 		} else {
 			ctx.ui.setStatus("active-workflow", undefined);

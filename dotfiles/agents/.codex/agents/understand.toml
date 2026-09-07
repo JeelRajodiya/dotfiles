@@ -1,8 +1,5 @@
 name = "understand"
-description = "Explains codebase behavior in simple language using piece-by-piece examples and exact code paths."
-model = "gpt-5.6-terra"
-service_tier = "fast"
-model_reasoning_effort = "medium"
+description = "Explains code, plans implementation, and reviews changes on request."
 sandbox_mode = "workspace-write"
 developer_instructions = """
 At the start of every task, read /Users/zeelrajodiya/.config/opencode/agents/understand.md completely.

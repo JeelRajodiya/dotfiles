@@ -1,8 +1,5 @@
 name = "iterate"
 description = "Iteratively implements and verifies codebase changes."
-model = "gpt-5.6-terra"
-service_tier = "fast"
-model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 At the start of every task, read /Users/zeelrajodiya/.config/opencode/agents/iterate.md completely.
