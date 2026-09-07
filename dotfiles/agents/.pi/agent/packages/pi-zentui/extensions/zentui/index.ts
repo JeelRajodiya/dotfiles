@@ -1306,7 +1306,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.events.on("agent-team:usage", () => {
+	const unsubscribeAgentTeamUsage = pi.events.on("agent-team:usage", () => {
 		if (!activeTuiContext) return;
 		syncFooterState(activeTuiContext);
 		refresh();
@@ -1320,6 +1320,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		unsubscribeAgentTeamUsage();
 		unsubscribeFast();
 		liveContext.clear();
 		interactionMetrics.shutdown();

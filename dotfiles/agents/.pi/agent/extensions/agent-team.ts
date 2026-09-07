@@ -1,1100 +1,292 @@
-/**
- * Agent Team — Dispatcher-only orchestrator with grid dashboard
- *
- * The primary Pi agent has NO codebase tools. It can ONLY delegate work
- * to specialist agents via the `dispatch_agent` tool. Each specialist
- * maintains its own Pi session for cross-invocation memory.
- *
- * Loads agent definitions from agents/*.md, .claude/agents/*.md, .pi/agents/*.md.
- * Teams are defined in .pi/agents/teams.yaml — on boot a select dialog lets
- * you pick which team to work with. Only team members are available for dispatch.
- *
- * Commands:
- *   /agent NAME           — open an agent's chat session
- *   /AGENT TASK           — queue one agent directly (for example /iterate)
- *   /agents-team          — switch active team or use normal mode
- *   /agents-list          — list loaded agents
- *   /agents-grid N        — set column count (default 2)
- *
- * Usage: pi -e extensions/agent-team.ts
- */
-
+/** Dynamic, session-local specialist teams. */
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Text, type AutocompleteItem, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { randomUUID } from "crypto";
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
+import { readdirSync, readFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join, resolve } from "path";
 import {
-	AgentRpcTransport,
-	childSessionPath,
-	contextTokensFromUsage,
-	encodeCwd,
-	formatAgentContext,
-	hasRunningAgent,
-	latestAssistantContextTokens,
-	latestChildTranscript,
-	pruneSessionDirs,
-	shouldFinalizeAgentEvent,
-	terminateChild,
+	AgentRpcTransport, childSessionPath, contextTokensFromUsage, encodeCwd, formatAgentContext,
+	latestAssistantContextTokens, latestChildTranscript, pruneSessionDirs, shouldFinalizeAgentEvent, terminateChild,
 } from "./agent-team-helpers";
 
-// ── Types ────────────────────────────────────────
-
-interface AgentDef {
-	name: string;
-	description: string;
-	model?: string;
-	tools: string;
-	systemPrompt: string;
-	file: string;
-}
-
+interface AgentDef { name: string; description: string; model?: string; tools: string; systemPrompt: string; file: string; }
 interface ActiveAgentRun {
-	child: ChildProcessWithoutNullStreams;
-	transport: AgentRpcTransport;
-	textChunks: string[];
-	initialTask: string;
-	sessionFile: string;
-	startTime: number;
-	runId: string;
-	usageSequence: number;
-	accepted: boolean;
-	finished: boolean;
-	stopping: boolean;
+	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; textChunks: string[]; initialTask: string;
+	sessionFile: string; startTime: number; runId: string; usageSequence: number; accepted: boolean; finished: boolean; stopping: boolean;
 }
-
 interface AgentState {
-	def: AgentDef;
-	status: "idle" | "running" | "done" | "error";
-	task: string;
-	toolCount: number;
-	elapsed: number;
-	lastWork: string;
-	history: string;
-	contextTokens?: number;
-	contextWindow: number;
-	cost: number;
-	sessionFile: string | null;
-	runCount: number;
-	timer?: ReturnType<typeof setInterval>;
-	activeRun?: ActiveAgentRun;
+	name: string; def: AgentDef; goal: string; status: "idle" | "running" | "done" | "error"; task: string;
+	toolCount: number; elapsed: number; lastWork: string; history: string; contextTokens: number; contextWindow: number;
+	sessionFile: string | null; runCount: number; timer?: ReturnType<typeof setInterval>; activeRun?: ActiveAgentRun;
 }
-
-// ── Display Name Helper ──────────────────────────
-
-function displayName(name: string): string {
-	return name.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-}
-
-// ── Teams YAML Parser ────────────────────────────
-
-function parseTeamsYaml(raw: string): Record<string, string[]> {
-	const teams: Record<string, string[]> = {};
-	let current: string | null = null;
-	for (const line of raw.split("\n")) {
-		const teamMatch = line.match(/^(\S[^:]*):$/);
-		if (teamMatch) {
-			current = teamMatch[1].trim();
-			teams[current] = [];
-			continue;
-		}
-		const itemMatch = line.match(/^\s+-\s+(.+)$/);
-		if (itemMatch && current) {
-			teams[current].push(itemMatch[1].trim());
-		}
-	}
-	return teams;
-}
-
-// ── Frontmatter Parser ───────────────────────────
-
-function parseAgentFile(filePath: string): AgentDef | null {
-	try {
-		const raw = readFileSync(filePath, "utf-8");
-		const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
-		if (!match) return null;
-
-		const frontmatter: Record<string, string> = {};
-		for (const line of match[1].split("\n")) {
-			const idx = line.indexOf(":");
-			if (idx > 0) {
-				frontmatter[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-			}
-		}
-
-		if (!frontmatter.name) return null;
-
-		return {
-			name: frontmatter.name,
-			description: frontmatter.description || "",
-			model: frontmatter.model,
-			tools: frontmatter.tools || "read,grep,find,ls",
-			systemPrompt: match[2].trim(),
-			file: filePath,
-		};
-	} catch {
-		return null;
-	}
-}
-
-function scanAgentDirs(cwd: string): AgentDef[] {
-	const dirs = [
-		join(cwd, "agents"),
-		join(cwd, ".claude", "agents"),
-		join(cwd, ".pi", "agents"),
-		join(homedir(), ".pi", "agent", "agents"),
-	];
-
-	const agents: AgentDef[] = [];
-	const seen = new Set<string>();
-
-	for (const dir of dirs) {
-		if (!existsSync(dir)) continue;
-		try {
-			for (const file of readdirSync(dir)) {
-				if (!file.endsWith(".md")) continue;
-				const fullPath = resolve(dir, file);
-				const def = parseAgentFile(fullPath);
-				if (def && !seen.has(def.name.toLowerCase())) {
-					seen.add(def.name.toLowerCase());
-					agents.push(def);
-				}
-			}
-		} catch {}
-	}
-
-	return agents;
-}
-
-// ── Extension ────────────────────────────────────
+type SavedInstance = { name: string; type: string; goal: string };
+type SavedTeam = { instances: SavedInstance[]; root?: string };
+type LegacyTeamMode = { team?: string | null };
 
 const TEAM_TOOLS = ["dispatch_agent", "set_agent_model"];
-/** Parent-session transcript folders kept per project before the oldest are dropped. */
 const MAX_KEPT_SESSIONS = 20;
+/**
+ * A child resumes its transcript with -c, so its own tool results pile up across
+ * dispatches and get re-sent on every call. Past this many context tokens the
+ * transcript is recycled and the next dispatch starts clean.
+ */
+const MAX_CHILD_CONTEXT_TOKENS = 120_000;
+const displayName = (name: string) => name.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+const key = (name: string) => name.toLowerCase();
+const normalizeName = (name: string) => name.trim().toLowerCase().replace(/\s+/g, "-");
+
+function parseAgentFile(file: string): AgentDef | null {
+	try {
+		const raw = readFileSync(file, "utf-8");
+		const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+		if (!match) return null;
+		const frontmatter: Record<string, string> = {};
+		for (const line of match[1].split("\n")) {
+			const colon = line.indexOf(":");
+			if (colon > 0) frontmatter[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
+		}
+		if (!frontmatter.name) return null;
+		return { name: frontmatter.name, description: frontmatter.description || "", model: frontmatter.model,
+			tools: frontmatter.tools || "read,grep,find,ls", systemPrompt: match[2].trim(), file };
+	} catch { return null; }
+}
+function scanAgentDirs(cwd: string): AgentDef[] {
+	const dirs = [join(cwd, "agents"), join(cwd, ".claude", "agents"), join(cwd, ".pi", "agents"), join(homedir(), ".pi", "agent", "agents")];
+	const seen = new Set<string>(); const defs: AgentDef[] = [];
+	for (const dir of dirs) {
+		if (!existsSync(dir)) continue;
+		try { for (const file of readdirSync(dir)) {
+			if (!file.endsWith(".md")) continue;
+			const def = parseAgentFile(resolve(dir, file));
+			if (def && !seen.has(key(def.name))) { seen.add(key(def.name)); defs.push(def); }
+		} } catch {}
+	}
+	return defs;
+}
 
 export default function (pi: ExtensionAPI) {
-	const agentStates: Map<string, AgentState> = new Map();
+	const agentStates = new Map<string, AgentState>();
 	const agentModelOverrides = new Map<string, string>();
 	let allAgentDefs: AgentDef[] = [];
-	let teams: Record<string, string[]> = {};
-	let activeTeamName = "";
-	let gridCols = 2;
-	let widgetCtx: any;
-	let sessionDir = "";
-	let parentSessionId = "";
-	let viewedAgent: AgentState | undefined;
-	let directAgent: AgentDef | undefined;
-	let normalMode = false;
-	let defaultTools: string[] = [];
-	const registeredAgentCommands = new Set<string>();
+	let widgetCtx: any; let sessionDir = ""; let parentSessionId = "";
+	let viewedAgent: AgentState | undefined; let rootAgent: AgentState | undefined;
+	let gridCols = 2; let rootStartTime = 0;
 
-	function parentModel(ctx: any): string {
-		return ctx.model
-			? `${ctx.model.provider}/${ctx.model.id}`
-			: "openrouter/google/gemini-3-flash-preview";
-	}
-
-	function effectiveAgentModel(def: AgentDef, ctx: any): string {
-		return agentModelOverrides.get(def.name.toLowerCase()) ?? def.model ?? parentModel(ctx);
-	}
-
-	function modelContextWindow(model: string, ctx: any): number {
-		const slash = model.indexOf("/");
-		return slash > 0
-			? ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))?.contextWindow ?? 0
-			: 0;
-	}
-
-	function modelSetting(def: AgentDef, ctx: any): string {
-		const override = agentModelOverrides.get(def.name.toLowerCase());
-		if (override) return `${override} (session override)`;
-		if (def.model) return `${def.model} (default)`;
-		return `${parentModel(ctx)} (inherited)`;
-	}
-
-	function validModel(model: string, ctx: any): boolean {
-		const slash = model.indexOf("/");
-		return slash > 0 && Boolean(ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1)));
-	}
-
-	function setAgentModel(agentName: string, model: string, ctx: any): string {
-		const def = allAgentDefs.find(agent => agent.name.toLowerCase() === agentName.toLowerCase());
-		if (!def) throw new Error(`Unknown agent "${agentName}"`);
-		if (model === "inherit") {
-			agentModelOverrides.delete(def.name.toLowerCase());
-		} else if (validModel(model, ctx)) {
-			agentModelOverrides.set(def.name.toLowerCase(), model);
-		} else {
-			throw new Error(`Unknown model "${model}"`);
+	const stateFor = (name: string) => agentStates.get(key(name));
+	const parentModel = (ctx: any) => ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "openrouter/google/gemini-3-flash-preview";
+	const effectiveModel = (state: AgentState, ctx: any) => agentModelOverrides.get(key(state.name)) ?? state.def.model ?? parentModel(ctx);
+	const modelWindow = (model: string, ctx: any) => {
+		const slash = model.indexOf("/"); return slash > 0 ? ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))?.contextWindow ?? 0 : 0;
+	};
+	const modelSetting = (state: AgentState, ctx: any) => {
+		const override = agentModelOverrides.get(key(state.name));
+		return override ? `${override} (session override)` : state.def.model ? `${state.def.model} (default)` : `${parentModel(ctx)} (inherited)`;
+	};
+	function setInstanceModel(state: AgentState, model: string, ctx: any): string {
+		if (model === "inherit") agentModelOverrides.delete(key(state.name));
+		else {
+			const slash = model.indexOf("/");
+			if (slash < 1 || !ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))) throw new Error(`Unknown model "${model}"`);
+			agentModelOverrides.set(key(state.name), model);
 		}
 		pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) });
-		const state = agentStates.get(def.name.toLowerCase());
-		if (state && state.status !== "running") {
-			state.contextWindow = modelContextWindow(effectiveAgentModel(def, ctx), ctx);
-			updateWidget();
-		}
-		return modelSetting(def, ctx);
+		state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx);
+		updateWidget();
+		return modelSetting(state, ctx);
 	}
-
-	function sessionPath(def: AgentDef): string {
-		return childSessionPath(sessionDir, parentSessionId, def.name);
+	async function setRootModel(state: AgentState, requested: string, ctx: any): Promise<string> {
+		const modelName = requested === "inherit" ? state.def.model ?? parentModel(ctx) : requested;
+		const slash = modelName.indexOf("/");
+		const model = slash > 0 ? ctx.modelRegistry.find(modelName.slice(0, slash), modelName.slice(slash + 1)) : undefined;
+		if (!model) throw new Error(`Unknown model "${modelName}"`);
+		if ((!ctx.model || parentModel(ctx) !== modelName) && !await pi.setModel(model)) throw new Error(`Unable to select ${modelName}`);
+		if (requested === "inherit") agentModelOverrides.delete(key(state.name)); else agentModelOverrides.set(key(state.name), requested);
+		pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) });
+		state.contextWindow = modelWindow(modelName, ctx); updateWidget();
+		return modelSetting(state, ctx);
 	}
-
-	function ensureSession(def: AgentDef, cwd: string): string {
-		const path = sessionPath(def);
-		if (!existsSync(join(sessionDir, parentSessionId))) mkdirSync(join(sessionDir, parentSessionId), { recursive: true });
-		if (!existsSync(path)) {
-			writeFileSync(path, JSON.stringify({
-				type: "session",
-				version: 3,
-				id: randomUUID(),
-				timestamp: new Date().toISOString(),
-				cwd,
-			}) + "\n");
-		}
+	const sessionPath = (state: AgentState) => childSessionPath(sessionDir, parentSessionId, state.name);
+	function ensureSession(state: AgentState, cwd: string): string {
+		const path = sessionPath(state); const dir = join(sessionDir, parentSessionId);
+		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+		if (!existsSync(path)) writeFileSync(path, JSON.stringify({ type: "session", version: 3, id: randomUUID(), timestamp: new Date().toISOString(), cwd }) + "\n");
 		return path;
 	}
-
-	function loadAgents(cwd: string) {
-		// Child transcripts live beside pi's own sessions, not inside the project,
-		// so working trees stay clean. Keyed by cwd the way pi keys its sessions.
-		sessionDir = join(getAgentDir(), "agent-team-sessions", encodeCwd(cwd));
-		if (!existsSync(sessionDir)) {
-			mkdirSync(sessionDir, { recursive: true });
-		}
-		pruneSessionDirs(sessionDir, MAX_KEPT_SESSIONS);
-
-		// Load all agent definitions
-		allAgentDefs = scanAgentDirs(cwd);
-		for (const def of allAgentDefs) {
-			if (registeredAgentCommands.has(def.name)) continue;
-			registeredAgentCommands.add(def.name);
-			pi.registerCommand(def.name, {
-				description: `Queue a background task for ${displayName(def.name)}`,
-				handler: async (args, ctx) => {
-					const task = args.trim();
-					if (!task) {
-						ctx.ui.notify(`Usage: /${def.name} <task> (or /agent ${def.name} for direct chat)`, "info");
-						return;
-					}
-					widgetCtx = ctx;
-					if (!agentStates.has(def.name.toLowerCase())) {
-						agentStates.set(def.name.toLowerCase(), createState(def));
-					}
-					try {
-						const submitted = await submitAgent(def.name, task, ctx);
-						ctx.ui.notify(
-							submitted.status === "steered"
-								? `${displayName(def.name)} steering accepted`
-								: `${displayName(def.name)} started in the background`,
-							"info",
-						);
-					} catch (error) {
-						ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-					}
-				},
-			});
-		}
-
-		// Prefer project teams, then use the global agent configuration.
-		const projectTeamsPath = join(cwd, ".pi", "agents", "teams.yaml");
-		const teamsPath = existsSync(projectTeamsPath)
-			? projectTeamsPath
-			: join(homedir(), ".pi", "agent", "agents", "teams.yaml");
-		if (existsSync(teamsPath)) {
-			try {
-				teams = parseTeamsYaml(readFileSync(teamsPath, "utf-8"));
-			} catch {
-				teams = {};
+	function makeState(def: AgentDef, name: string, goal: string): AgentState {
+		const provisional = { name, def } as AgentState; const file = sessionPath(provisional);
+		return { name, def, goal, status: "idle", task: "", toolCount: 0, elapsed: 0, lastWork: "", history: latestChildTranscript(file),
+			contextTokens: latestAssistantContextTokens(file) ?? 0, contextWindow: modelWindow(def.model ?? parentModel(widgetCtx), widgetCtx),
+			sessionFile: existsSync(file) ? file : null, runCount: 0 };
+	}
+	function persistTeam() {
+		pi.appendEntry("agent-team-instances", { instances: [...agentStates.values()].map(state => ({ name: state.name, type: state.def.name, goal: state.goal })), root: rootAgent?.name });
+	}
+	function restoreTeam(ctx: any) {
+		const entries = ctx.sessionManager.getEntries();
+		const snapshot = entries.filter((entry: any) => entry.type === "custom" && entry.customType === "agent-team-instances").pop();
+		const saved = snapshot?.data as SavedTeam | undefined;
+		agentStates.clear(); rootAgent = undefined;
+		if (snapshot) {
+			for (const item of saved?.instances ?? []) {
+				const def = allAgentDefs.find(candidate => key(candidate.name) === key(item.type));
+				if (def && /^[a-z0-9_-]+$/i.test(item.name) && !agentStates.has(key(item.name))) agentStates.set(key(item.name), makeState(def, item.name, item.goal || def.description));
 			}
-		} else {
-			teams = {};
+			rootAgent = saved?.root ? stateFor(saved.root) : undefined;
+			return;
 		}
-
-		// If no teams defined, create a default "all" team
-		if (Object.keys(teams).length === 0) {
-			teams = { all: allAgentDefs.map(d => d.name) };
+		const legacy = entries.filter((entry: any) => entry.type === "custom" && entry.customType === "agent-team-mode").pop()?.data as LegacyTeamMode | undefined;
+		if (legacy?.team) {
+			const teamsFile = [join(ctx.cwd, ".pi", "agents", "teams.yaml"), join(homedir(), ".pi", "agent", "agents", "teams.yaml")].find(existsSync);
+			let active = false;
+			for (const line of teamsFile ? readFileSync(teamsFile, "utf-8").split("\n") : []) {
+				if (line.match(new RegExp(`^${legacy.team.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*$`))) { active = true; continue; }
+				if (active && /^\S/.test(line)) break;
+				const member = active ? line.match(/^\s+-\s+(.+)$/)?.[1]?.trim() : undefined;
+				const def = member && allAgentDefs.find(candidate => key(candidate.name) === key(member));
+				if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
+			}
 		}
+		persistTeam();
+	}
+	function loadAgents(cwd: string) {
+		sessionDir = join(getAgentDir(), "agent-team-sessions", encodeCwd(cwd));
+		if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true });
+		pruneSessionDirs(sessionDir, MAX_KEPT_SESSIONS); allAgentDefs = scanAgentDirs(cwd);
+	}
+	function rootTools(state: AgentState): string[] { return [...new Set([...state.def.tools.split(",").map(tool => tool.trim()).filter(Boolean), ...TEAM_TOOLS])]; }
+	async function promote(state: AgentState, ctx: any) {
+		await ctx.waitForIdle();
+		state = stateFor(state.name)!;
+		if (!state || rootAgent) throw new Error(rootAgent ? `Root is already ${displayName(rootAgent.name)} for this session` : "Instance no longer exists");
+		if (state.status === "running") throw new Error(`Wait for ${displayName(state.name)} to finish before promotion`);
+		const modelName = effectiveModel(state, ctx); const slash = modelName.indexOf("/");
+		const model = slash > 0 ? ctx.modelRegistry.find(modelName.slice(0, slash), modelName.slice(slash + 1)) : undefined;
+		if (!model || (parentModel(ctx) !== modelName && !await pi.setModel(model))) throw new Error(`Unable to select ${modelName}`);
+		viewedAgent = undefined; rootAgent = state; pi.setActiveTools(rootTools(state)); persistTeam(); updateWidget();
+		ctx.ui.setStatus("agent-team", `Root: ${displayName(state.name)}`);
+		ctx.ui.notify(`${displayName(state.name)} is now this session's root.`, "info");
 	}
 
-	function createState(def: AgentDef): AgentState {
-		const file = sessionPath(def);
-		return {
-			def,
-			status: "idle",
-			task: "",
-			toolCount: 0,
-			elapsed: 0,
-			lastWork: "",
-			history: latestChildTranscript(file),
-			contextTokens: latestAssistantContextTokens(file) ?? 0,
-			contextWindow: modelContextWindow(effectiveAgentModel(def, widgetCtx), widgetCtx),
-			cost: 0,
-			sessionFile: existsSync(file) ? file : null,
-			runCount: 0,
-		};
+	function renderCard(state: AgentState, width: number, theme: any, root = false): string[] {
+		const cardWidth = Math.max(1, width); const w = Math.max(1, cardWidth - 2); const trim = (value: string) => truncateToWidth(value, Math.max(1, w - 1));
+		const icon = state.status === "running" ? "●" : state.status === "done" ? "✓" : state.status === "error" ? "✗" : "○";
+		const color = state.status === "running" ? "accent" : state.status === "done" ? "success" : state.status === "error" ? "error" : "dim";
+		const label = root ? `ROOT ${state.name} (${state.def.name})` : `${state.name} (${state.def.name})`;
+		const status = `${icon} ${state.status}`; const context = formatAgentContext(state.contextTokens, state.contextWindow); const suffix = `${status} · ${context}`;
+		const labelWidth = Math.max(0, w - 1 - visibleWidth(suffix) - visibleWidth(" · "));
+		const activity = state.task ? `Task: ${state.task}` : `Goal: ${state.goal || state.def.description}`;
+		const tools = `Tools: ${state.toolCount} · ${Math.round(state.elapsed / 1000)}s`;
+		const row = (content: string) => theme.fg("dim", "│") + " " + content + " ".repeat(Math.max(0, w - visibleWidth(content) - 1)) + theme.fg("dim", "│");
+		const summary = labelWidth ? theme.bold(theme.fg("accent", truncateToWidth(label, labelWidth))) + theme.fg("muted", " · ") + theme.fg(color, status) + theme.fg("muted", ` · ${context}`) : theme.fg(color, truncateToWidth(suffix, Math.max(1, w - 1)));
+		return [theme.fg("dim", `┌${"─".repeat(w)}┐`), row(summary), row(theme.fg("muted", trim(`${activity} · ${tools}`))), theme.fg("dim", `└${"─".repeat(w)}┘`)].map(line => truncateToWidth(line, cardWidth));
 	}
-
-	function activateTeam(teamName: string) {
-		activeTeamName = teamName;
-		const members = teams[teamName] || [];
-		const defsByName = new Map(allAgentDefs.map(d => [d.name.toLowerCase(), d]));
-
-		agentStates.clear();
-		for (const member of members) {
-			const def = defsByName.get(member.toLowerCase());
-			if (def) agentStates.set(def.name.toLowerCase(), createState(def));
-		}
-
-		// Auto-size grid columns based on team size
-		const size = agentStates.size;
-		gridCols = size <= 3 ? size : size === 4 ? 2 : 3;
-	}
-
-	// ── Grid Rendering ───────────────────────────
-
-	function renderCard(state: AgentState, colWidth: number, theme: any): string[] {
-		const w = colWidth - 2;
-		const truncate = (s: string, max: number) => s.length > max ? s.slice(0, max - 3) + "..." : s;
-
-		const statusColor = state.status === "idle" ? "dim"
-			: state.status === "running" ? "accent"
-			: state.status === "done" ? "success" : "error";
-		const statusIcon = state.status === "idle" ? "○"
-			: state.status === "running" ? "●"
-			: state.status === "done" ? "✓" : "✗";
-
-		const name = displayName(state.def.name);
-		const nameStr = theme.fg("accent", theme.bold(truncate(name, w)));
-		const nameVisible = Math.min(name.length, w);
-
-		const statusStr = `${statusIcon} ${state.status}`;
-		const timeStr = state.status !== "idle" ? ` ${Math.round(state.elapsed / 1000)}s` : "";
-		const statusLine = theme.fg(statusColor, statusStr + timeStr);
-		const statusVisible = statusStr.length + timeStr.length;
-
-		const ctxStr = formatAgentContext(state.contextTokens ?? 0, state.contextWindow);
-		const ctxLine = theme.fg("dim", ctxStr);
-		const ctxVisible = ctxStr.length;
-
-		const workRaw = state.task
-			? (state.lastWork || state.task)
-			: state.def.description;
-		const workText = truncate(workRaw, Math.min(50, w - 1));
-		const workLine = theme.fg("muted", workText);
-		const workVisible = workText.length;
-
-		const top = "┌" + "─".repeat(w) + "┐";
-		const bot = "└" + "─".repeat(w) + "┘";
-		const border = (content: string, visLen: number) =>
-			theme.fg("dim", "│") + content + " ".repeat(Math.max(0, w - visLen)) + theme.fg("dim", "│");
-		const separator = theme.fg("dim", " · ");
-		const summary = " " + nameStr + separator + statusLine + separator + ctxLine;
-		const summaryVisible = 1 + nameVisible + 3 + statusVisible + 3 + ctxVisible;
-
-		return [
-			theme.fg("dim", top),
-			border(summary, summaryVisible),
-			border(" " + workLine, 1 + workVisible),
-			theme.fg("dim", bot),
-		];
-	}
-
 	function updateWidget() {
 		if (!widgetCtx) return;
-
-		try {
-			widgetCtx.ui.setWidget("agent-team", (_tui: any, theme: any) => {
-			const text = new Text("", 0, 0);
-
-			return {
-				render(width: number): string[] {
-					if (viewedAgent) {
-						const state = viewedAgent;
-						const history = state.history || state.lastWork || "No child output yet.";
-						text.setText([
-							theme.fg("accent", `${displayName(state.def.name)} · ${state.status}`),
-							theme.fg("dim", `${state.contextTokens ?? 0}/${state.contextWindow || "?"} tokens · ${state.toolCount} tools · ${Math.round(state.elapsed / 1000)}s`),
-							theme.fg("muted", history.slice(-2000)),
-							theme.fg("dim", "Use /agent exit to return."),
-						].join("\n"));
-						return text.render(width);
-					}
-					if (agentStates.size === 0) {
-						text.setText(theme.fg("dim", "No agents found. Add .md files to agents/"));
-						return text.render(width);
-					}
-
-					const cols = Math.min(gridCols, agentStates.size);
-					const gap = 1;
-					const colWidth = Math.floor((width - gap * (cols - 1)) / cols);
-					const agents = Array.from(agentStates.values());
-					const rows: string[][] = [];
-
-					for (let i = 0; i < agents.length; i += cols) {
-						const rowAgents = agents.slice(i, i + cols);
-						const cards = rowAgents.map(a => renderCard(a, colWidth, theme));
-
-						while (cards.length < cols) {
-							cards.push(Array(4).fill(" ".repeat(colWidth)));
-						}
-
-						const cardHeight = cards[0].length;
-						for (let line = 0; line < cardHeight; line++) {
-							rows.push(cards.map(card => card[line] || ""));
-						}
-					}
-
-					const output = rows.map(cols => cols.join(" ".repeat(gap)));
-					text.setText(output.join("\n"));
-					return text.render(width);
-				},
-				invalidate() {
-					text.invalidate();
-				},
-			};
-			});
-		} catch {
-			widgetCtx = undefined;
-		}
+		widgetCtx.ui.setWidget("agent-team", (_tui: any, theme: any) => {
+			const text = new Text("", 0, 0); return { invalidate() { text.invalidate(); }, render(width: number) {
+				if (viewedAgent) {
+						const state = viewedAgent; text.setText([theme.fg("accent", `${state.name} (${state.def.name}) · ${state.status}`), theme.fg("dim", `Goal: ${state.goal}\n${formatAgentContext(state.contextTokens, state.contextWindow)} tokens · ${state.toolCount} tools · ${Math.round(state.elapsed / 1000)}s`), theme.fg("muted", state.history || state.lastWork || "No child output yet."), theme.fg("dim", "Use /agent exit to close this detail view.")].join("\n")); return text.render(width);
+				}
+				if (!agentStates.size) { text.setText(theme.fg("dim", "No dynamic instances. Use /agent add <type> <name>.")); return text.render(width); }
+				const renderWidth = Math.max(1, width); const states = [...agentStates.values()].filter(state => state !== rootAgent); const rows = rootAgent ? renderCard(rootAgent, renderWidth, theme, true) : [];
+				if (rootAgent && states.length) rows.push("");
+				if (states.length) { const gap = 1; const maxCols = Math.max(1, Math.floor((renderWidth + gap) / 13)); const cols = Math.min(gridCols, states.length, maxCols); const cardWidth = Math.max(1, Math.floor((renderWidth - gap * (cols - 1)) / cols)); for (let i = 0; i < states.length; i += cols) { const cards = states.slice(i, i + cols).map(state => renderCard(state, cardWidth, theme)); while (cards.length < cols) cards.push(Array(4).fill(" ".repeat(cardWidth))); for (let line = 0; line < 4; line++) rows.push(truncateToWidth(cards.map(card => card[line]).join(" "), renderWidth)); } }
+				text.setText(rows.join("\n")); return text.render(renderWidth);
+			} };
+		});
 	}
 
-	// ── Dispatch Agent ───────────────────────────
-
-	function terminateRun(run: ActiveAgentRun): void {
-		run.stopping = true;
-		run.transport.fail(new Error("Agent process stopped"));
-		terminateChild(run.child);
-	}
-
-	function finishRun(state: AgentState, run: ActiveAgentRun, error?: Error): void {
-		if (run.finished || state.activeRun !== run) return;
-		run.finished = true;
-		clearInterval(state.timer);
-		state.elapsed = Date.now() - run.startTime;
-		state.status = error ? "error" : "done";
-		if (!error) state.sessionFile = run.sessionFile;
-		const full = run.textChunks.join("");
-		state.lastWork = error?.message ?? full.split("\n").filter(line => line.trim()).pop() ?? "";
-		state.activeRun = undefined;
-		updateWidget();
-
+	function terminateRun(run: ActiveAgentRun) { run.stopping = true; run.transport.fail(new Error("Agent process stopped")); terminateChild(run.child); }
+	function finishRun(state: AgentState, run: ActiveAgentRun, error?: Error) {
+		if (run.finished || state.activeRun !== run) return; run.finished = true; clearInterval(state.timer); state.elapsed = Date.now() - run.startTime; state.status = error ? "error" : "done"; state.sessionFile = run.sessionFile;
+		const output = run.textChunks.join(""); state.lastWork = error?.message ?? output.split("\n").filter(Boolean).pop() ?? ""; state.activeRun = undefined; updateWidget();
 		if (!run.stopping && run.accepted) {
-			const output = full.length > 8000 ? `${full.slice(0, 8000)}\n\n... [truncated]` : full;
-			const result = { output: error ? error.message : output, exitCode: error ? 1 : 0, elapsed: state.elapsed };
-			try {
-				pi.sendMessage({
-					customType: "agent-team-result",
-					content: `[${displayName(state.def.name)}] ${error ? "failed" : "completed"} in ${Math.round(state.elapsed / 1000)}s\nTask: ${run.initialTask}\n\n${result.output || "(no output)"}`,
-					display: true,
-					details: { agent: state.def.name, task: run.initialTask, result },
-				}, { deliverAs: "followUp", triggerTurn: true });
-				widgetCtx?.ui.notify(
-					`${displayName(state.def.name)} ${state.status} in ${Math.round(state.elapsed / 1000)}s`,
-					error ? "error" : "success",
-				);
-			} catch {
-				widgetCtx = undefined;
-			}
+			const result = error ? error.message : output.slice(0, 8000) || "(no output)";
+			pi.sendMessage({ customType: "agent-team-result", content: `Private result from ${state.name} (${state.def.name}) for ${run.initialTask}:\n${result}`, display: false, details: { agent: state.name, status: state.status, elapsed: state.elapsed } }, { deliverAs: "followUp", triggerTurn: true });
+			widgetCtx?.ui.notify(`${displayName(state.name)} ${state.status} in ${Math.round(state.elapsed / 1000)}s`, error ? "error" : "success");
 		}
 		terminateRun(run);
 	}
-
-	function startAgent(state: AgentState, task: string, model: string, ctx: any): ActiveAgentRun {
-		state.status = "running";
-		state.contextWindow = modelContextWindow(model, ctx);
-		state.task = task;
-		state.toolCount = 0;
-		state.elapsed = 0;
-		state.lastWork = "";
-		state.history = latestChildTranscript(sessionPath(state.def));
-		state.runCount++;
-
-		const startTime = Date.now();
-		state.timer = setInterval(() => {
-			state.elapsed = Date.now() - startTime;
-			updateWidget();
-		}, 1000);
-
-		const agentSessionFile = ensureSession(state.def, ctx.cwd);
-		const args = [
-			"--mode", "rpc",
-			"--no-extensions",
-			"--extension", join(homedir(), ".pi", "agent", "extensions", "openai-codex-fast.ts"),
-			"--extension", join(homedir(), ".pi", "agent", "extensions", "ponytail.ts"),
-			"--model", model,
-			"--tools", state.def.tools,
-			"--thinking", "off",
-			"--append-system-prompt", state.def.systemPrompt,
-			"--session", agentSessionFile,
-		];
+	function recycleSession(state: AgentState, ctx: any): void {
+		try { rmSync(sessionPath(state), { force: true }); } catch {}
+		state.sessionFile = null; state.contextTokens = 0; state.history = "";
+		ctx.ui?.notify?.(`${displayName(state.name)} transcript recycled — next dispatch starts fresh`, "info");
+	}
+	function startAgent(state: AgentState, task: string, ctx: any): ActiveAgentRun {
+		if (state.sessionFile && state.contextTokens > MAX_CHILD_CONTEXT_TOKENS) recycleSession(state, ctx);
+		state.status = "running"; state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); state.task = task; state.toolCount = 0; state.elapsed = 0; state.lastWork = ""; state.history = latestChildTranscript(sessionPath(state)); state.runCount++;
+		const startTime = Date.now(); state.timer = setInterval(() => { state.elapsed = Date.now() - startTime; updateWidget(); }, 1000);
+		const file = ensureSession(state, ctx.cwd); const args = ["--mode", "rpc", "--no-extensions", "--extension", join(homedir(), ".pi", "agent", "extensions", "openai-codex-fast.ts"), "--extension", join(homedir(), ".pi", "agent", "extensions", "ponytail.ts"), "--model", effectiveModel(state, ctx), "--tools", state.def.tools, "--thinking", "off", "--append-system-prompt", `${state.def.systemPrompt}\n\n# Assigned goal\n${state.goal}`, "--session", file];
 		if (state.sessionFile) args.push("-c");
-
-		const child = spawn("pi", args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } });
-		const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
-		const run: ActiveAgentRun = {
-			child,
-			transport,
-			textChunks: [],
-			initialTask: task,
-			sessionFile: agentSessionFile,
-			startTime,
-			runId: randomUUID(),
-			usageSequence: 0,
-			accepted: false,
-			finished: false,
-			stopping: false,
-		};
-		state.activeRun = run;
-		updateWidget();
-
-		let buffer = "";
-		const persistUsage = (eventType: string, message: any, usage: any) => {
-			if (!usage || typeof usage !== "object") return;
-			const sourceEventId = `${run.runId}:${eventType}:${++run.usageSequence}`;
-			pi.appendEntry("agent-team-usage", {
-				sourceEventId,
-				usage,
-				provider: message?.provider,
-				model: message?.model,
-			});
-			pi.events.emit("agent-team:usage");
-		};
-		const handleEvent = (event: any) => {
-			if (transport.handle(event)) return;
-			if (event.type === "message_update") {
-				const delta = event.assistantMessageEvent;
-				if (delta?.type === "text_delta") {
-					run.textChunks.push(delta.delta || "");
-					const full = run.textChunks.join("");
-					state.lastWork = full.split("\n").filter((line: string) => line.trim()).pop() || "";
-					state.history = `${state.history}\nassistant: ${delta.delta || ""}`.slice(-2000);
-					updateWidget();
-				}
-			} else if (event.type === "tool_execution_start") {
-				state.toolCount++;
-				updateWidget();
-			} else if (event.type === "message_end") {
-				const tokens = contextTokensFromUsage(event.message?.usage);
-				if (tokens !== undefined) state.contextTokens = tokens;
-				persistUsage("message", event.message, event.message?.usage);
-				updateWidget();
-			} else if (event.type === "compaction_end") {
-				persistUsage("compaction", event.result, event.result?.usage);
-			} else if (event.type === "agent_end") {
-				const last = [...(event.messages || [])]
-					.reverse()
-					.find((message: any) =>
-						message.role === "assistant" && contextTokensFromUsage(message.usage) !== undefined
-					);
-				const tokens = contextTokensFromUsage(last?.usage);
-				if (tokens !== undefined) state.contextTokens = tokens;
-				updateWidget();
-			} else if (shouldFinalizeAgentEvent(event.type)) {
-				finishRun(state, run);
-			}
-		};
-		const handleLine = (line: string) => {
-			if (!line.trim()) return;
-			try { handleEvent(JSON.parse(line.endsWith("\r") ? line.slice(0, -1) : line)); } catch {}
-		};
-
-		child.stdout.setEncoding("utf-8");
-		child.stdout.on("data", (chunk: string) => {
-			buffer += chunk;
-			let newline;
-			while ((newline = buffer.indexOf("\n")) !== -1) {
-				handleLine(buffer.slice(0, newline));
-				buffer = buffer.slice(newline + 1);
-			}
-		});
-		child.stderr.setEncoding("utf-8");
-		child.stderr.on("data", () => {});
-		child.stdin.on("error", error => transport.fail(error));
-		child.on("error", error => {
-			transport.fail(error);
-			if (!run.stopping) finishRun(state, run, new Error(`Agent process error: ${error.message}`));
-		});
-		child.on("close", code => {
-			handleLine(buffer);
-			transport.fail(new Error(`Agent process exited with code ${code ?? 1}`));
-			if (!run.finished && !run.stopping) {
-				finishRun(state, run, new Error(`Agent process exited before settling (code ${code ?? 1})`));
-			}
-		});
+		const child = spawn("pi", args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } }); const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
+		const run: ActiveAgentRun = { child, transport, textChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false }; state.activeRun = run; updateWidget();
+		let buffer = ""; const persistUsage = (kind: string, message: any, usage: any) => { if (!usage || typeof usage !== "object") return; pi.appendEntry("agent-team-usage", { sourceEventId: `${run.runId}:${kind}:${++run.usageSequence}`, usage, provider: message?.provider, model: message?.model }); pi.events.emit("agent-team:usage"); };
+		const handle = (event: any) => { if (transport.handle(event)) return; if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") { const delta = event.assistantMessageEvent.delta || ""; run.textChunks.push(delta); state.lastWork = run.textChunks.join("").split("\n").filter(Boolean).pop() || ""; state.history = `${state.history}\nassistant: ${delta}`.slice(-2000); updateWidget(); } else if (event.type === "tool_execution_start") { state.toolCount++; updateWidget(); } else if (event.type === "message_end") { const tokens = contextTokensFromUsage(event.message?.usage); if (tokens !== undefined) state.contextTokens = tokens; persistUsage("message", event.message, event.message?.usage); updateWidget(); } else if (event.type === "compaction_end") persistUsage("compaction", event.result, event.result?.usage); else if (shouldFinalizeAgentEvent(event.type)) finishRun(state, run); };
+		const line = (value: string) => { if (!value.trim()) return; try { handle(JSON.parse(value.endsWith("\r") ? value.slice(0, -1) : value)); } catch {} };
+		child.stdout.setEncoding("utf-8"); child.stdout.on("data", (chunk: string) => { buffer += chunk; let newline; while ((newline = buffer.indexOf("\n")) !== -1) { line(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1); } }); child.stderr.on("data", () => {}); child.stdin.on("error", error => transport.fail(error)); child.on("error", error => { transport.fail(error); if (!run.stopping) finishRun(state, run, new Error(`Agent process error: ${error.message}`)); }); child.on("close", code => { line(buffer); transport.fail(new Error(`Agent process exited with code ${code ?? 1}`)); if (!run.finished && !run.stopping) finishRun(state, run, new Error(`Agent process exited before settling (code ${code ?? 1})`)); });
 		return run;
 	}
-
-	async function submitAgent(agentName: string, task: string, ctx: any) {
-		const state = agentStates.get(agentName.toLowerCase());
-		if (!state) throw new Error(`Agent "${agentName}" not found`);
-
-		if (state.status === "running") {
-			const run = state.activeRun;
-			if (!run || run.finished || run.stopping) throw new Error(`Agent "${displayName(state.def.name)}" has no active steering transport`);
-			try {
-				await run.transport.request({ type: "prompt", message: task, streamingBehavior: "steer" });
-			} catch (error) {
-				throw new Error(`Unable to steer ${displayName(state.def.name)}: ${error instanceof Error ? error.message : String(error)}`);
-			}
-			return { status: "steered" as const };
-		}
-
-		const run = startAgent(state, task, effectiveAgentModel(state.def, ctx), ctx);
-		try {
-			await run.transport.request({ type: "prompt", message: task });
-			run.accepted = true;
-			return { status: "running" as const };
-		} catch (error) {
-			const failure = new Error(`Unable to start ${displayName(state.def.name)}: ${error instanceof Error ? error.message : String(error)}`);
-			finishRun(state, run, failure);
-			throw failure;
-		}
+	async function submitAgent(name: string, task: string, ctx: any) {
+		const state = stateFor(name); if (!state) throw new Error(`Unknown dynamic instance "${name}"`); if (rootAgent === state) throw new Error("The root agent cannot dispatch itself");
+		if (state.status === "running") { const run = state.activeRun; if (!run || run.finished || run.stopping) throw new Error(`${displayName(state.name)} cannot be steered`); await run.transport.request({ type: "prompt", message: task, streamingBehavior: "steer" }); return { status: "steered" as const }; }
+		const run = startAgent(state, task, ctx); try { await run.transport.request({ type: "prompt", message: task }); run.accepted = true; return { status: "running" as const }; } catch (error) { const failure = new Error(`Unable to start ${displayName(state.name)}: ${error instanceof Error ? error.message : String(error)}`); finishRun(state, run, failure); throw failure; }
 	}
 
-	// ── dispatch_agent Tool (registered at top level) ──
-
-	pi.registerTool({
-		name: "dispatch_agent",
-		label: "Dispatch Agent",
-		description: "Start a specialist agent in the background, or steer that agent when it is already running. Different agents run concurrently. Results are posted back to the main chat.",
-		parameters: Type.Object({
-			agent: Type.String({ description: "Agent name (case-insensitive)" }),
-			task: Type.String({ description: "Task description for the agent to execute" }),
-		}),
-
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const { agent, task } = params as { agent: string; task: string };
-			const submitted = await submitAgent(agent, task, ctx);
-			const message = submitted.status === "steered"
-				? `${displayName(agent)} steering accepted.`
-				: `${displayName(agent)} started in the background. The result will be posted to this chat.`;
-			return {
-				content: [{ type: "text", text: message }],
-				details: { agent, task, status: submitted.status },
-			};
-		},
-
-		renderCall(args, theme) {
-			const agentName = (args as any).agent || "?";
-			const task = (args as any).task || "";
-			const preview = task.length > 60 ? task.slice(0, 57) + "..." : task;
-			return new Text(
-				theme.fg("toolTitle", theme.bold("dispatch_agent ")) +
-				theme.fg("accent", agentName) +
-				theme.fg("dim", " — ") +
-				theme.fg("muted", preview),
-				0, 0,
-			);
-		},
-
-		renderResult(result, options, theme) {
-			const details = result.details as any;
-			if (!details) {
-				const text = result.content[0];
-				return new Text(text?.type === "text" ? text.text : "", 0, 0);
-			}
-
-			// Streaming/partial result while agent is still running
-			if (options.isPartial || details.status === "dispatching") {
-				return new Text(
-					theme.fg("accent", `● ${details.agent || "?"}`) +
-					theme.fg("dim", " working..."),
-					0, 0,
-				);
-			}
-
-			if (details.status === "running" || details.status === "steered") {
-				const suffix = details.status === "steered" ? " steering accepted" : " background";
-				return new Text(theme.fg("accent", `● ${details.agent}`) + theme.fg("dim", suffix), 0, 0);
-			}
-
-			const icon = details.status === "done" ? "✓" : "✗";
-			const color = details.status === "done" ? "success" : "error";
-			const elapsed = typeof details.elapsed === "number" ? Math.round(details.elapsed / 1000) : 0;
-			const header = theme.fg(color, `${icon} ${details.agent}`) +
-				theme.fg("dim", ` ${elapsed}s`);
-
-			if (options.expanded && details.fullOutput) {
-				const output = details.fullOutput.length > 4000
-					? details.fullOutput.slice(0, 4000) + "\n... [truncated]"
-					: details.fullOutput;
-				return new Text(header + "\n" + theme.fg("muted", output), 0, 0);
-			}
-
-			return new Text(header, 0, 0);
-		},
+	pi.registerTool({ name: "dispatch_agent", label: "Dispatch Agent", description: "Dispatch or steer a named dynamic team instance. Results return privately for one host response.", parameters: Type.Object({ agent: Type.String({ description: "Unique dynamic instance name" }), task: Type.String({ description: "Focused task" }) }),
+		async execute(_id, params, _signal, _update, ctx) { const { agent, task } = params as { agent: string; task: string }; const submitted = await submitAgent(agent, task, ctx); return { content: [{ type: "text", text: `${displayName(agent)} ${submitted.status === "steered" ? "steering accepted" : "is working in the background"}.` }], details: { agent, status: submitted.status } }; },
+		renderCall(args, theme) { const task = (args as any).task || ""; return new Text(theme.fg("toolTitle", theme.bold("dispatch_agent ")) + theme.fg("accent", (args as any).agent || "?") + theme.fg("dim", ` — ${task.slice(0, 60)}`), 0, 0); },
+		renderResult(result, _options, theme) { const details = result.details as any; return new Text(theme.fg(details?.status === "steered" ? "accent" : "accent", `${details?.status === "steered" ? "●" : "●"} ${details?.agent || "agent"}`) + theme.fg("dim", details?.status === "steered" ? " steering accepted" : " working..."), 0, 0); },
 	});
-
-	pi.registerTool({
-		name: "set_agent_model",
-		label: "Set Agent Model",
-		description: "Set a session-specific model for an agent, or use inherit to restore its configured default.",
-		parameters: Type.Object({
-			agent: Type.String({ description: "Agent name (case-insensitive)" }),
-			model: Type.String({ description: "Provider/model identifier, or inherit" }),
-		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const { agent, model } = params as { agent: string; model: string };
-			const setting = setAgentModel(agent, model, ctx);
-			return {
-				content: [{ type: "text", text: `${displayName(agent)} model: ${setting}` }],
-				details: { agent, model: setting },
-			};
-		},
-	});
-
-	// ── Commands ─────────────────────────────────
-
-	pi.registerCommand("agent-model", {
-		description: "Show or set an agent model for this session",
-		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
-			const teamAgents = normalMode || directAgent
-				? []
-				: Array.from(agentStates.values()).map(state => state.def);
-			const space = prefix.indexOf(" ");
-			if (space < 0) {
-				const items = teamAgents
-					.filter(def => def.name.startsWith(prefix))
-					.map(def => ({ value: def.name, label: def.name }));
-				return items.length > 0 ? items : null;
-			}
-			const agent = prefix.slice(0, space);
-			if (!teamAgents.some(def => def.name === agent)) return null;
-			const modelPrefix = prefix.slice(space + 1);
-			const models = ["inherit", ...new Set(allAgentDefs.map(def => def.model).filter(Boolean) as string[])];
-			const items = models
-				.filter(model => model.startsWith(modelPrefix))
-				.map(model => ({ value: `${agent} ${model}`, label: model }));
-			return items.length > 0 ? items : null;
-		},
-		handler: async (args, ctx) => {
-			if (directAgent) {
-				ctx.ui.notify("Use /agent exit first; direct chats use normal model controls", "warning");
-				return;
-			}
-			const [agent, model, ...extra] = args.trim().split(/\s+/);
-			if (!agent) {
-				ctx.ui.notify(Array.from(agentStates.values()).map(state => `${displayName(state.def.name)}: ${modelSetting(state.def, ctx)}`).join("\n"), "info");
-				return;
-			}
-			if (!model || extra.length > 0) {
-				ctx.ui.notify("Usage: /agent-model <agent> <provider/model|inherit>", "error");
-				return;
-			}
-			try {
-				ctx.ui.notify(`${displayName(agent)} model: ${setAgentModel(agent, model, ctx)}`, "info");
-			} catch (error) {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-			}
-		},
-	});
+	pi.registerTool({ name: "set_agent_model", label: "Set Agent Model", description: "Set a session model for a named dynamic instance.", parameters: Type.Object({ agent: Type.String(), model: Type.String() }), async execute(_id, params, _signal, _update, ctx) { const { agent, model } = params as { agent: string; model: string }; const state = stateFor(agent); if (!state) throw new Error(`Unknown dynamic instance "${agent}"`); if (state === rootAgent) throw new Error("Change the root model with /agent-model when the host is idle"); return { content: [{ type: "text", text: `${state.name}: ${setInstanceModel(state, model, ctx)}` }], details: { agent: state.name } }; } });
 
 	pi.registerCommand("agent", {
-		description: "View an agent's existing background state, or return with /agent exit",
-		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
-			const names = viewedAgent
-				? ["exit"]
-				: normalMode
-					? allAgentDefs.map(def => def.name)
-					: Array.from(agentStates.values()).map(state => state.def.name);
-			const items = names
-				.filter(name => name.startsWith(prefix))
-				.map(name => ({ value: name, label: name }));
-			return items.length > 0 ? items : null;
-		},
-		handler: async (args, ctx) => {
-			const requested = args.trim();
-			if (requested === "exit") {
-				viewedAgent = undefined;
-				ctx.ui.setStatus("agent-team", undefined);
-				updateWidget();
-				return;
+		description: "Add, promote, or inspect a dynamic team instance",
+		getArgumentCompletions(prefix: string): AutocompleteItem[] | null { const parts = prefix.split(/\s+/); const names = [...agentStates.values()].map(state => state.name); const choices = parts.length <= 1 ? ["add", "promote", ...names] : parts[0] === "add" ? allAgentDefs.map(def => def.name) : parts[0] === "promote" ? names : []; return choices.filter(value => value.startsWith(parts.at(-1) || "")).map(value => ({ value: parts.length > 1 ? `${parts.slice(0, -1).join(" ")} ${value}` : value, label: value })); },
+		async handler(args, ctx) {
+			widgetCtx = ctx; const [command, ...rest] = args.trim().split(/\s+/);
+			if (command === "add") {
+				const [type, rawName, ...extra] = rest; const def = allAgentDefs.find(candidate => key(candidate.name) === key(type || "")); const name = normalizeName(rawName || "");
+				if (!def || !name || extra.length || !/^[a-z0-9_-]+$/.test(name)) return void ctx.ui.notify("Usage: /agent add <type> <unique-name>", "error");
+				if (agentStates.has(key(name))) return void ctx.ui.notify(`Instance "${name}" already exists`, "error");
+				const defaultGoal = def.description || `Work as ${displayName(def.name)}`; const choice = await ctx.ui.select("Set instance goal", [`Default — ${defaultGoal}`, "Custom…"]); if (!choice) return;
+				const goal = choice === "Custom…" ? (await ctx.ui.input("Custom goal", "Goal for this instance"))?.trim() : defaultGoal; if (!goal) return;
+				const state = makeState(def, name, goal); agentStates.set(key(name), state); if (!rootAgent) pi.setActiveTools(TEAM_TOOLS); persistTeam(); updateWidget(); ctx.ui.notify(`Added ${displayName(name)} (${def.name})`, "info"); return;
 			}
-			if (viewedAgent) {
-				ctx.ui.notify(`Viewing ${displayName(viewedAgent.def.name)}. Use /agent exit to return.`, "info");
-				return;
-			}
-
-			let name = requested;
-			if (!name) {
-				const choices = normalMode
-					? allAgentDefs.map(def => def.name)
-					: Array.from(agentStates.values()).map(state => state.def.name);
-				name = await ctx.ui.select("Open Agent Chat", choices) ?? "";
-				if (!name) return;
-			}
-
-			const def = allAgentDefs.find(agent => agent.name.toLowerCase() === name.toLowerCase());
-			const allowed = normalMode || agentStates.has(name.toLowerCase());
-			if (!def || !allowed) {
-				ctx.ui.notify(`Agent "${name}" is not in the active team`, "error");
-				return;
-			}
-
-			const state = agentStates.get(def.name.toLowerCase());
-			if (!state) {
-				ctx.ui.notify(`Agent "${name}" is not active`, "error");
-				return;
-			}
-			viewedAgent = state;
-			ctx.ui.setStatus("agent-team", `Viewing: ${displayName(def.name)}`);
-			updateWidget();
+			if (command === "promote") { const state = stateFor(rest.join(" ")); if (!state) return void ctx.ui.notify("Usage: /agent promote <instance>", "error"); try { await promote(state, ctx); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return; }
+			if (command === "exit") { if (!viewedAgent) return void ctx.ui.notify("No detail view is open.", "warning"); viewedAgent = undefined; ctx.ui.setStatus("agent-team", rootAgent ? `Root: ${displayName(rootAgent.name)}` : undefined); updateWidget(); return; }
+			const state = stateFor(command || ""); if (!state) return void ctx.ui.notify("Usage: /agent <instance> | add <type> <name> | promote <name>", "info"); viewedAgent = state; ctx.ui.setStatus("agent-team", `Viewing: ${state === rootAgent ? "ROOT " : ""}${displayName(state.name)}`); updateWidget();
 		},
 	});
+	pi.registerCommand("agent-model", { description: "Show or set a dynamic instance model", getArgumentCompletions(prefix) { const names = [...agentStates.values()].map(state => state.name); return names.filter(name => name.startsWith(prefix.split(" ")[0])).map(name => ({ value: name, label: name })); }, async handler(args, ctx) { const [name, model] = args.trim().split(/\s+/); if (!name) return void ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name}: ${modelSetting(state, ctx)}`).join("\n") || "No instances", "info"); try { let state = stateFor(name); if (!state || !model) throw new Error("Usage: /agent-model <instance> <provider/model|inherit>"); if (state === rootAgent) { await ctx.waitForIdle(); state = stateFor(name); if (!state || state !== rootAgent) throw new Error("Root changed while waiting for host idle"); ctx.ui.notify(`ROOT ${state.name}: ${await setRootModel(state, model, ctx)}`, "info"); } else ctx.ui.notify(`${state.name}: ${setInstanceModel(state, model, ctx)}`, "info"); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } } });
+	pi.registerCommand("agents-list", { description: "List dynamic instances", async handler(_args, ctx) { ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No dynamic instances", "info"); } });
+	pi.registerCommand("agents-grid", { description: "Set dynamic team card columns", async handler(args, ctx) { const value = args.trim(); if (!/^[1-6]$/.test(value)) return void ctx.ui.notify("Usage: /agents-grid <1-6>", "error"); gridCols = Number(value); updateWidget(); } });
 
-	pi.registerCommand("agents-team", {
-		description: "Select a team, or choose none for normal Pi mode",
-		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
-			const items = ["none", ...Object.keys(teams)]
-				.filter(name => name.startsWith(prefix))
-				.map(name => ({ value: name, label: name }));
-			return items.length > 0 ? items : null;
-		},
-		handler: async (args, ctx) => {
-			widgetCtx = ctx;
-			const teamNames = Object.keys(teams);
-			let name = args.trim();
-			if (!name) {
-				const options = [
-					"none — Normal Pi mode",
-					...teamNames.map(team => `${team} — ${teams[team].map(displayName).join(", ")}`),
-				];
-				const choice = await ctx.ui.select("Select Team", options);
-				if (choice === undefined) return;
-				name = choice === options[0] ? "none" : teamNames[options.indexOf(choice) - 1];
-			}
-
-			if (name === "none") {
-				normalMode = true;
-				activeTeamName = "";
-				agentStates.clear();
-				pi.setActiveTools(defaultTools);
-				pi.appendEntry("agent-team-mode", { team: null });
-				ctx.ui.setWidget("agent-team", undefined);
-				ctx.ui.setStatus("agent-team", undefined);
-				ctx.ui.setFooter(undefined);
-				ctx.ui.notify("Normal Pi mode restored", "info");
-				return;
-			}
-
-			if (!teams[name]) {
-				ctx.ui.notify(`Unknown team "${name}"`, "error");
-				return;
-			}
-			normalMode = false;
-			activateTeam(name);
-			pi.setActiveTools(TEAM_TOOLS);
-			pi.appendEntry("agent-team-mode", { team: name });
-			updateWidget();
-			ctx.ui.setStatus("agent-team", undefined);
-			ctx.ui.notify(`Team: ${name} — ${Array.from(agentStates.values()).map(s => displayName(s.def.name)).join(", ")}`, "info");
-		},
-	});
-
-	pi.registerCommand("agents-list", {
-		description: "List all loaded agents",
-		handler: async (_args, _ctx) => {
-			widgetCtx = _ctx;
-			const names = Array.from(agentStates.values())
-				.map(s => {
-					const session = s.sessionFile ? "resumed" : "new";
-					return `${displayName(s.def.name)} (${s.status}, ${session}, runs: ${s.runCount}): ${s.def.description}`;
-				})
-				.join("\n");
-			_ctx.ui.notify(names || "No agents loaded", "info");
-		},
-	});
-
-	pi.registerCommand("agents-grid", {
-		description: "Set grid columns: /agents-grid <1-6>",
-		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
-			const items = ["1", "2", "3", "4", "5", "6"].map(n => ({
-				value: n,
-				label: `${n} columns`,
-			}));
-			const filtered = items.filter(i => i.value.startsWith(prefix));
-			return filtered.length > 0 ? filtered : items;
-		},
-		handler: async (args, _ctx) => {
-			widgetCtx = _ctx;
-			const n = parseInt(args?.trim() || "", 10);
-			if (n >= 1 && n <= 6) {
-				gridCols = n;
-				_ctx.ui.notify(`Grid set to ${gridCols} columns`, "info");
-				updateWidget();
-			} else {
-				_ctx.ui.notify("Usage: /agents-grid <1-6>", "error");
-			}
-		},
-	});
-
-	// ── System Prompt Override ───────────────────
-
-	pi.on("input", async (event, ctx) => {
-		if (!viewedAgent || event.text.startsWith("/")) return;
-		try {
-			const submitted = await submitAgent(viewedAgent.def.name, event.text, ctx);
-			ctx.ui.notify(
-				submitted.status === "steered"
-					? `${displayName(viewedAgent.def.name)} steering accepted`
-					: `${displayName(viewedAgent.def.name)} started`,
-				"info",
-			);
-		} catch (error) {
-			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+	pi.on("input", async (event, ctx) => { if (!viewedAgent || viewedAgent === rootAgent || event.text.startsWith("/")) return; try { const submitted = await submitAgent(viewedAgent.name, event.text, ctx); ctx.ui.notify(`${displayName(viewedAgent.name)} ${submitted.status === "steered" ? "steering accepted" : "started"}`, "info"); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return { action: "handled" as const }; });
+	pi.on("before_agent_start", async (event, ctx) => {
+		if (rootAgent) {
+			rootAgent.task = event.prompt; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens;
+			const catalog = [...agentStates.values()].filter(state => state !== rootAgent).map(state => `- ${state.name} (${state.def.name}): ${state.goal}`).join("\n") || "(none)";
+			return { systemPrompt: `${event.systemPrompt}\n\n# Root agent identity: ${rootAgent.name} (${rootAgent.def.name})\nGoal: ${rootAgent.goal}\n\n${rootAgent.def.systemPrompt}\n\nYou are the visible host assistant. Work directly with your enabled tools. You may delegate focused work with dispatch_agent to these instances:\n${catalog}\nNever dispatch yourself. Child results are private context; synthesize one coherent answer for the user.` };
 		}
-		return { action: "handled" as const };
+		const catalog = [...agentStates.values()].map(state => `- ${state.name} (${state.def.name}): ${state.goal}`).join("\n") || "(none)";
+		return { systemPrompt: `${event.systemPrompt}\n\nYou are a dispatcher. Delegate through dispatch_agent only. Dynamic instances:\n${catalog}\nDo not use codebase tools directly. Synthesize child results into one answer.` };
 	});
-
-	pi.on("before_agent_start", async (_event, _ctx) => {
-		if (normalMode) return;
-		if (directAgent) {
-			return {
-				systemPrompt: `${_event.systemPrompt}\n\n# Direct agent: ${displayName(directAgent.name)}\n\n${directAgent.systemPrompt}`,
-			};
-		}
-
-		// Build dynamic agent catalog from active team only
-		const agentCatalog = Array.from(agentStates.values())
-			.map(s => `### ${displayName(s.def.name)}\n**Dispatch as:** \`${s.def.name}\`\n${s.def.description}\n**Model:** ${modelSetting(s.def, _ctx)}\n**Tools:** ${s.def.tools}`)
-			.join("\n\n");
-
-		const teamMembers = Array.from(agentStates.values()).map(s => displayName(s.def.name)).join(", ");
-
-		return {
-			systemPrompt: `You are a dispatcher agent. You coordinate specialist agents to accomplish tasks.
-You do NOT have direct access to the codebase. You MUST delegate all work through
-agents using the dispatch_agent tool.
-
-## Active Team: ${activeTeamName}
-Members: ${teamMembers}
-You can ONLY dispatch to agents listed below. Do not attempt to dispatch to agents outside this team.
-
-## How to Work
-- Analyze the user's request and break it into clear sub-tasks
-- Choose the right agent(s) for each sub-task
-- Dispatch tasks using the dispatch_agent tool
-- Use set_agent_model when the user asks to change an agent's model
-- Review results and dispatch follow-up agents if needed
-- If a task fails, try a different agent or adjust the task description
-- Summarize the outcome for the user
-
-## Rules
-- NEVER try to read, write, or execute code directly — you have no such tools
-- ALWAYS use dispatch_agent to get work done
-- Model overrides apply to this parent session; use set_agent_model with inherit to clear one
-- You can chain agents: use scout to explore, then builder to implement
-- You can dispatch the same agent multiple times with different tasks
-- Keep tasks focused — one clear objective per dispatch
-
-## Agents
-
-${agentCatalog}`,
-		};
-	});
-
-	// ── Session Start ────────────────────────────
-
-	pi.on("model_select", (_event, ctx) => {
-		for (const state of agentStates.values()) {
-			if (state.status !== "running") {
-				state.contextWindow = modelContextWindow(effectiveAgentModel(state.def, ctx), ctx);
-			}
-		}
-		updateWidget();
-	});
-
-	pi.on("session_shutdown", () => {
-		for (const state of agentStates.values()) {
-			if (!state.activeRun) continue;
-			clearInterval(state.timer);
-			terminateRun(state.activeRun);
-		}
-	});
-
-	pi.on("session_start", async (_event, _ctx) => {
-		// Clear widgets from previous session
-		if (widgetCtx) {
-			widgetCtx.ui.setWidget("agent-team", undefined);
-		}
-		widgetCtx = _ctx;
-		parentSessionId = _ctx.sessionManager.getSessionId();
-		viewedAgent = undefined;
-		defaultTools = pi.getActiveTools().filter(tool => !TEAM_TOOLS.includes(tool));
-		loadAgents(_ctx.cwd);
-		agentModelOverrides.clear();
-
-		directAgent = undefined;
-
-		normalMode = false;
-		{
-			const savedOverrides = _ctx.sessionManager.getEntries()
-				.filter(entry => entry.type === "custom" && entry.customType === "agent-team-model-overrides")
-				.pop()?.data as { overrides?: Record<string, string> } | undefined;
-			for (const [agent, model] of Object.entries(savedOverrides?.overrides ?? {})) {
-				if (allAgentDefs.some(def => def.name.toLowerCase() === agent) && validModel(model, _ctx)) {
-					agentModelOverrides.set(agent, model);
-				}
-			}
-
-			const savedMode = _ctx.sessionManager.getEntries()
-				.filter(entry => entry.type === "custom" && entry.customType === "agent-team-mode")
-				.pop()?.data as { team?: string | null } | undefined;
-
-			const team = savedMode?.team && teams[savedMode.team] ? savedMode.team : undefined;
-			if (!team) {
-				normalMode = true;
-				activeTeamName = "";
-				agentStates.clear();
-				pi.setActiveTools(defaultTools);
-				_ctx.ui.setWidget("agent-team", undefined);
-				_ctx.ui.setStatus("agent-team", undefined);
-				_ctx.ui.setFooter(undefined);
-			} else {
-				activateTeam(team);
-
-				pi.setActiveTools(TEAM_TOOLS);
-				_ctx.ui.setStatus("agent-team", undefined);
-				const members = Array.from(agentStates.values()).map(s => displayName(s.def.name)).join(", ");
-				_ctx.ui.notify(
-					`Team: ${activeTeamName} (${members})\n` +
-					`Team sets loaded from: .pi/agents/teams.yaml\n\n` +
-					`/agent <name>        Open an agent chat\n` +
-					`/agent-model         Show or change agent models\n` +
-					`/agents-team         Select a team or normal mode\n` +
-					`/agents-list         List active agents and status\n` +
-					`/agents-grid <1-6>   Set grid column count`,
-					"info",
-				);
-				updateWidget();
-			}
-		}
-
-		// Footer: model | team | context bar
-		if (normalMode) return;
-		_ctx.ui.setFooter((_tui, theme, _footerData) => ({
-			dispose: () => {},
-			invalidate() {},
-			render(width: number): string[] {
-				const model = _ctx.model?.id || "no-model";
-				const usage = _ctx.getContextUsage();
-				const pct = usage ? usage.percent : 0;
-				const filled = Math.round(pct / 10);
-				const bar = "#".repeat(filled) + "-".repeat(10 - filled);
-
-				const label = directAgent ? `@${directAgent.name}` : activeTeamName;
-				const left = theme.fg("dim", ` ${model}`) +
-					theme.fg("muted", " · ") +
-					theme.fg("accent", label);
-				const right = theme.fg("dim", `[${bar}] ${Math.round(pct)}% `);
-				const pad = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
-
-				return [truncateToWidth(left + pad + right, width)];
-			},
-		}));
+	pi.on("model_select", (_event, ctx) => { for (const state of agentStates.values()) if (state.status !== "running") state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); updateWidget(); });
+	pi.on("agent_start", (_event, ctx) => { if (!rootAgent) return; clearInterval(rootAgent.timer); rootAgent.status = "running"; rootAgent.toolCount = 0; rootAgent.elapsed = 0; rootStartTime = Date.now(); rootAgent.timer = setInterval(() => { if (rootAgent) { rootAgent.elapsed = Date.now() - rootStartTime; updateWidget(); } }, 1000); rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); });
+	pi.on("message_start", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
+	pi.on("message_update", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
+	pi.on("message_end", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
+	pi.on("tool_execution_start", (event, ctx) => { if (rootAgent) { rootAgent.toolCount++; rootAgent.task = `Using ${event.toolName}`; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
+	pi.on("tool_execution_end", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
+	pi.on("agent_settled", (_event, ctx) => { if (!rootAgent) return; clearInterval(rootAgent.timer); rootAgent.elapsed = rootStartTime ? Date.now() - rootStartTime : rootAgent.elapsed; rootAgent.status = "done"; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); });
+	pi.on("session_shutdown", () => { for (const state of agentStates.values()) { clearInterval(state.timer); if (state.activeRun) terminateRun(state.activeRun); } });
+	pi.on("session_start", async (_event, ctx) => {
+		widgetCtx = ctx; parentSessionId = ctx.sessionManager.getSessionId(); viewedAgent = undefined; loadAgents(ctx.cwd);
+		agentModelOverrides.clear(); const overrides = ctx.sessionManager.getEntries().filter((entry: any) => entry.type === "custom" && entry.customType === "agent-team-model-overrides").pop()?.data as { overrides?: Record<string, string> } | undefined; for (const [name, model] of Object.entries(overrides?.overrides ?? {})) agentModelOverrides.set(name, model);
+		restoreTeam(ctx); for (const state of agentStates.values()) state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); if (rootAgent) { const modelName = effectiveModel(rootAgent, ctx); const slash = modelName.indexOf("/"); const model = slash > 0 ? ctx.modelRegistry.find(modelName.slice(0, slash), modelName.slice(slash + 1)) : undefined; const restored = parentModel(ctx) === modelName || !!model && await pi.setModel(model); if (!restored) ctx.ui.notify(`ROOT ${rootAgent.name}: unable to restore model ${modelName}`, "warning"); pi.setActiveTools(rootTools(rootAgent)); ctx.ui.setStatus("agent-team", `Root: ${displayName(rootAgent.name)}${restored ? "" : " (model restore failed)"}`); } else pi.setActiveTools(TEAM_TOOLS); updateWidget();
+		ctx.ui.setFooter((_tui, theme) => ({ dispose() {}, invalidate() {}, render(width: number) { const model = ctx.model?.id || "no-model"; const usage = ctx.getContextUsage(); const pct = usage?.percent ?? 0; const left = theme.fg("dim", ` ${model}`) + theme.fg("muted", " · ") + theme.fg("accent", rootAgent ? `@${rootAgent.name}` : "dynamic team"); const right = theme.fg("dim", `[${"#".repeat(Math.round(pct / 10))}${"-".repeat(10 - Math.round(pct / 10))}] ${Math.round(pct)}% `); return [truncateToWidth(left + " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right))) + right, width)]; } }));
 	});
 }
