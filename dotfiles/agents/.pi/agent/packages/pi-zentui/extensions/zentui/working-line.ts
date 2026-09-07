@@ -575,6 +575,14 @@ function truncateWithEllipsis(value: string, capacity: number): string {
 
 export type ComposedWorkingLine = { message: string; row: string };
 
+/** Reasoning takes priority over the generic working copy until its real lifecycle ends. */
+export function activeWorkingLineMessage(
+	message: string | undefined,
+	thought: WorkingLineRuntimeSegments["thought"],
+): string {
+	return thought?.active ? "Thinking" : message ?? WORKING_LINE_FALLBACK_MESSAGE;
+}
+
 /** Validate and measure the fixed visible width shared by every frame in a preset. */
 export function workingLineSpinnerWidth(spinnerId: WorkingLineComponentConfig["spinner"]): number {
 	const frames: readonly string[] = WORKING_LINE_SPINNERS[spinnerId].frames;
@@ -1170,10 +1178,11 @@ export class WorkingLineController {
 
 	private makeFrameKey(rootConfig: ZentuiConfig, selectedMessage: string | undefined): string {
 		const config = rootConfig.components.workingLine;
+		const runtime = this.runtimeSegments();
 		const { row } = composeWorkingLineRow(
 			config,
-			selectedMessage ?? WORKING_LINE_FALLBACK_MESSAGE,
-			this.runtimeSegments(),
+			activeWorkingLineMessage(selectedMessage, runtime.thought),
+			runtime,
 		);
 		return JSON.stringify([
 			"owned",
@@ -1235,8 +1244,8 @@ export class WorkingLineController {
 				sampled?.textTick ?? 0,
 			);
 		}
-		const message = selectedMessage ?? WORKING_LINE_FALLBACK_MESSAGE;
 		const runtime = this.runtimeSegments();
+		const message = activeWorkingLineMessage(selectedMessage, runtime.thought);
 		const composed = composeWorkingLineRow(config, message, runtime);
 		const spinnerWidth = workingLineSpinnerWidth(config.spinner);
 		const textWidth =
