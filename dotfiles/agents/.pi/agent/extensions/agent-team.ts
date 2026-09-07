@@ -764,7 +764,7 @@ export default function (pi: ExtensionAPI) {
 			pi.setActiveTools(["dispatch_agent"]);
 			pi.appendEntry("agent-team-mode", { team: name });
 			updateWidget();
-			ctx.ui.setStatus("agent-team", `Team: ${name} (${agentStates.size})`);
+			ctx.ui.setStatus("agent-team", undefined);
 			ctx.ui.notify(`Team: ${name} — ${Array.from(agentStates.values()).map(s => displayName(s.def.name)).join(", ")}`, "info");
 		},
 	});
@@ -897,7 +897,7 @@ ${agentCatalog}`,
 				if (team) activateTeam(team);
 
 				pi.setActiveTools(["dispatch_agent"]);
-				_ctx.ui.setStatus("agent-team", `Team: ${activeTeamName} (${agentStates.size})`);
+				_ctx.ui.setStatus("agent-team", undefined);
 				const members = Array.from(agentStates.values()).map(s => displayName(s.def.name)).join(", ");
 				_ctx.ui.notify(
 					`Team: ${activeTeamName} (${members})\n` +
