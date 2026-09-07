@@ -886,15 +886,17 @@ ${agentCatalog}`,
 				.filter(entry => entry.type === "custom" && entry.customType === "agent-team-mode")
 				.pop()?.data as { team?: string | null } | undefined;
 
-			if (savedMode?.team === null) {
+			const team = savedMode?.team && teams[savedMode.team] ? savedMode.team : undefined;
+			if (!team) {
 				normalMode = true;
+				activeTeamName = "";
+				agentStates.clear();
 				pi.setActiveTools(defaultTools);
+				_ctx.ui.setWidget("agent-team", undefined);
 				_ctx.ui.setStatus("agent-team", undefined);
 				_ctx.ui.setFooter(undefined);
 			} else {
-				const teamNames = Object.keys(teams);
-				const team = savedMode?.team && teams[savedMode.team] ? savedMode.team : teamNames[0];
-				if (team) activateTeam(team);
+				activateTeam(team);
 
 				pi.setActiveTools(["dispatch_agent"]);
 				_ctx.ui.setStatus("agent-team", undefined);
