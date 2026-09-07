@@ -1,0 +1,11 @@
+/* Center every rendered D2 diagram */
+.block-language-d2 svg {
+  display: block;
+  margin-inline: auto;
+}
+
+/* Rounded nodes in every rendered D2 diagram */
+.block-language-d2 svg rect {
+  rx: 12px;
+  ry: 12px;
+}
