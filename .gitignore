@@ -2,3 +2,4 @@
 /.codex/
 /dotfiles/target/
 /dotfiles/agents/.pi/agent/states/openai-fast.json
+/graphify-out
