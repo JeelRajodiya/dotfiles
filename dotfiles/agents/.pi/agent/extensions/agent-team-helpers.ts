@@ -30,6 +30,17 @@ export function latestAssistantContextTokens(sessionFile: string): number | unde
 	return latest;
 }
 
+const cleanActivityText = (value: unknown) => String(value ?? "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim();
+const shortActivityText = (value: unknown, max = 180) => {
+	const text = cleanActivityText(value); return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+};
+export function formatToolActivity(name: unknown, args: unknown): string {
+	const values = args && typeof args === "object" ? args as Record<string, unknown> : {};
+	const details = ["path", "file", "pattern", "command", "description", "query", "url", "agent", "task"]
+		.flatMap(key => values[key] === undefined ? [] : [`${key}: ${shortActivityText(values[key], 96)}`]);
+	return `${cleanActivityText(name) || "tool"}${details.length ? ` — ${details.slice(0, 2).join(" · ")}` : ""}`;
+}
+
 export function latestChildTranscript(sessionFile: string, maxChars = 2000): string {
 	if (!existsSync(sessionFile)) return "";
 	const lines: string[] = [];
@@ -37,15 +48,38 @@ export function latestChildTranscript(sessionFile: string, maxChars = 2000): str
 		try {
 			const message = JSON.parse(line)?.message;
 			if (!message || (message.role !== "user" && message.role !== "assistant")) continue;
-			const content = typeof message.content === "string"
-				? message.content
-				: Array.isArray(message.content)
-					? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("")
-					: "";
+			const content = typeof message.content === "string" ? message.content : Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("") : "";
 			if (content) lines.push(`${message.role}: ${content}`);
 		} catch {}
 	}
 	return lines.join("\n").slice(-maxChars);
+}
+
+/** Compact, safe timeline recovered from a child Pi JSONL session. */
+export function latestChildActivity(sessionFile: string, maxEntries = 24): string {
+	if (!existsSync(sessionFile)) return "";
+	const entries: string[] = []; const calls = new Map<string, { summary: string; timestamp?: number }>();
+	for (const line of readFileSync(sessionFile, "utf-8").split("\n")) {
+		try {
+			const entry = JSON.parse(line); const message = entry?.message; if (!message) continue;
+			const timestamp = Date.parse(entry.timestamp ?? message.timestamp ?? "") || undefined;
+			if (message.role === "user") {
+				const text = typeof message.content === "string" ? message.content : Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join(" ") : "";
+				if (text) entries.push(`user: ${shortActivityText(text)}`);
+			} else if (message.role === "assistant") {
+				if (typeof message.content === "string" && message.content) entries.push(`assistant: ${shortActivityText(message.content)}`);
+				for (const part of Array.isArray(message.content) ? message.content : []) {
+					if (part?.type === "text" && part.text) entries.push(`assistant: ${shortActivityText(part.text)}`);
+					if (part?.type === "toolCall") { const summary = formatToolActivity(part.name, part.arguments); calls.set(part.id, { summary, timestamp }); entries.push(`tool-start: ${summary}`); }
+				}
+			} else if (message.role === "toolResult") {
+				const call = calls.get(message.toolCallId); const elapsed = call?.timestamp && timestamp ? ` · ${Math.max(0, Math.round((timestamp - call.timestamp) / 1000))}s` : "";
+				const error = message.isError ? ` — ${shortActivityText(Array.isArray(message.content) ? message.content.find((part: any) => part?.type === "text")?.text : message.content, 96)}` : "";
+				entries.push(`${message.isError ? "tool-error" : "tool-done"}: ${(call?.summary ?? cleanActivityText(message.toolName)) || "tool"}${elapsed}${error}`);
+			}
+		} catch {}
+	}
+	return entries.slice(-maxEntries).join("\n").slice(-5000);
 }
 
 export function hasRunningAgent(states: Iterable<{ status: string }>): boolean {

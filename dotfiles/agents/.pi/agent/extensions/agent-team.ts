@@ -9,13 +9,13 @@ import { homedir } from "os";
 import { join, resolve } from "path";
 import {
 	AgentRpcTransport, childSessionPath, contextTokensFromUsage, encodeCwd, formatAgentContext,
-	latestAssistantContextTokens, latestChildTranscript, pruneSessionDirs, shouldFinalizeAgentEvent, terminateChild,
+	formatToolActivity, latestAssistantContextTokens, latestChildActivity, pruneSessionDirs, shouldFinalizeAgentEvent, terminateChild,
 } from "./agent-team-helpers";
 
 interface AgentDef { name: string; description: string; model?: string; tools: string; systemPrompt: string; file: string; }
 interface ActiveAgentRun {
 	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; textChunks: string[]; initialTask: string;
-	sessionFile: string; startTime: number; runId: string; usageSequence: number; accepted: boolean; finished: boolean; stopping: boolean;
+	sessionFile: string; startTime: number; runId: string; usageSequence: number; accepted: boolean; finished: boolean; stopping: boolean; toolStarts: Map<string, { summary: string; startTime: number }>;
 }
 interface AgentState {
 	name: string; def: AgentDef; goal: string; status: "idle" | "running" | "done" | "error"; task: string;
@@ -32,18 +32,19 @@ function agentHeading(state: AgentState, theme: any): string {
 }
 
 function recentActivity(history: string, lastWork: string): string[] {
-	const entries: { role: string; text: string }[] = [];
+	const entries: { kind: string; text: string }[] = [];
 	for (const line of history.split("\n")) {
-		const match = line.match(/^(user|assistant|tool):\s*([\s\S]*)$/i);
+		const match = line.match(/^(user|assistant|tool-start|tool-done|tool-error):\s*([\s\S]*)$/i);
 		if (!match) continue;
-		const role = match[1].toLowerCase(); const text = match[2].replace(/\s+/g, " ").trim();
+		const kind = match[1].toLowerCase(); const text = match[2].replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim();
 		if (!text || /^[{[]/.test(text)) continue;
 		const previous = entries.at(-1);
-		if (role === "assistant" && previous?.role === role) previous.text += text;
-		else entries.push({ role, text });
+		if (kind === "assistant" && previous?.kind === kind) previous.text += text;
+		else entries.push({ kind, text });
 	}
-	if (!entries.length && lastWork) entries.push({ role: "assistant", text: lastWork });
-	return entries.slice(-6).map(({ role, text }) => `${role[0].toUpperCase()}${role.slice(1)}: ${truncateToWidth(text, 360)}`);
+	if (!entries.length && lastWork) entries.push({ kind: "assistant", text: lastWork.replace(/\s+/g, " ").trim() });
+	const label: Record<string, string> = { user: "User", assistant: "Assistant", "tool-start": "Tool · running", "tool-done": "Tool · done", "tool-error": "Tool · error" };
+	return entries.slice(-16).map(entry => `${label[entry.kind]}: ${entry.text}`);
 }
 
 const TEAM_TOOLS = ["dispatch_agent", "set_agent_model"];
@@ -140,7 +141,7 @@ export default function (pi: ExtensionAPI) {
 	}
 	function makeState(def: AgentDef, name: string, goal: string, autoName = false, sessionKey = name): AgentState {
 		const provisional = { name, def, sessionKey } as AgentState; const file = sessionPath(provisional);
-		return { name, def, goal, status: "idle", task: "", toolCount: 0, elapsed: 0, lastWork: "", history: latestChildTranscript(file),
+		return { name, def, goal, status: "idle", task: "", toolCount: 0, elapsed: 0, lastWork: "", history: latestChildActivity(file),
 			contextTokens: latestAssistantContextTokens(file) ?? 0, contextWindow: modelWindow(def.model ?? parentModel(widgetCtx), widgetCtx),
 			sessionFile: existsSync(file) ? file : null, runCount: 0, autoName, sessionKey };
 	}
@@ -238,13 +239,14 @@ export default function (pi: ExtensionAPI) {
 		widgetCtx.ui.setWidget("agent-team", (_tui: any, theme: any) => {
 			const text = new Text("", 0, 0); return { invalidate() { text.invalidate(); }, render(width: number) {
 				if (viewedAgent) {
-						const state = viewedAgent; const activity = recentActivity(state.history, state.lastWork);
+						const state = viewedAgent; const activity = recentActivity(state.history, state.lastWork); const detailWidth = Math.max(12, width);
+						const detail = (value: string) => truncateToWidth(value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim(), detailWidth);
 						text.setText([
 							agentHeading(state, theme),
-							theme.fg("dim", `Status: ${state.status} · Model: ${effectiveModel(state, widgetCtx)} · Context: ${formatAgentContext(state.contextTokens, state.contextWindow)} · Elapsed: ${Math.round(state.elapsed / 1000)}s`),
-							"", theme.bold("Goal"), state.goal || state.def.description,
-							theme.bold("Current task"), state.task || "No active task.",
-							theme.bold("Recent activity"), theme.fg("muted", activity.join("\n") || "No recent activity."),
+							theme.fg("dim", detail(`Status: ${state.status} · Model: ${effectiveModel(state, widgetCtx)} · Context: ${formatAgentContext(state.contextTokens, state.contextWindow)} · Elapsed: ${Math.round(state.elapsed / 1000)}s`)),
+							"", theme.bold("Goal"), detail(state.goal || state.def.description),
+							theme.bold("Current task"), detail(state.task || "No active task."),
+							theme.bold("Recent activity"), theme.fg("muted", activity.map(detail).join("\n") || "No recent activity."),
 							theme.fg("dim", "Type a message to steer this agent. Use /agents exit to close."),
 						].join("\n")); return text.render(width);
 				}
@@ -268,14 +270,15 @@ export default function (pi: ExtensionAPI) {
 		terminateRun(run);
 	}
 	function startAgent(state: AgentState, task: string, ctx: any): ActiveAgentRun {
-		state.status = "running"; state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); state.task = task; state.toolCount = 0; state.elapsed = 0; state.lastWork = ""; state.history = latestChildTranscript(sessionPath(state)); state.runCount++;
+		state.status = "running"; state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); state.task = task; state.toolCount = 0; state.elapsed = 0; state.lastWork = ""; state.history = `${latestChildActivity(sessionPath(state))}\nuser: ${task}`.slice(-5000); state.runCount++;
 		const startTime = Date.now(); clearInterval(state.timer); state.timer = undefined; state.timer = setInterval(() => { state.elapsed = Date.now() - startTime; updateWidget(); }, 1000);
 		const file = ensureSession(state, ctx.cwd); const args = ["--mode", "rpc", "--no-extensions", "--extension", join(homedir(), ".pi", "agent", "extensions", "openai-codex-fast.ts"), "--extension", join(homedir(), ".pi", "agent", "extensions", "ponytail.ts"), "--model", effectiveModel(state, ctx), "--tools", state.def.tools, "--thinking", "off", "--append-system-prompt", `${state.def.systemPrompt}\n\n# Assigned goal\n${state.goal}`, "--session", file];
 		if (state.sessionFile) args.push("-c");
 		const child = spawn("pi", args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } }); const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
-		const run: ActiveAgentRun = { child, transport, textChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false }; state.activeRun = run; updateWidget();
-		let buffer = ""; const persistUsage = (kind: string, message: any, usage: any) => { if (!usage || typeof usage !== "object") return; pi.appendEntry("agent-team-usage", { sourceEventId: `${run.runId}:${kind}:${++run.usageSequence}`, usage, provider: message?.provider, model: message?.model }); pi.events.emit("agent-team:usage"); };
-		const handle = (event: any) => { if (transport.handle(event)) return; if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") { const delta = event.assistantMessageEvent.delta || ""; run.textChunks.push(delta); state.lastWork = run.textChunks.join("").split("\n").filter(Boolean).pop() || ""; state.history = `${state.history}\nassistant: ${delta}`.slice(-2000); updateWidget(); } else if (event.type === "tool_execution_start") { state.toolCount++; state.history = `${state.history}\ntool: ${event.toolName}`.slice(-2000); updateWidget(); } else if (event.type === "message_end") { const tokens = contextTokensFromUsage(event.message?.usage); if (tokens !== undefined) state.contextTokens = tokens; persistUsage("message", event.message, event.message?.usage); updateWidget(); } else if (event.type === "compaction_end") persistUsage("compaction", event.result, event.result?.usage); else if (shouldFinalizeAgentEvent(event.type)) finishRun(state, run); };
+		const run: ActiveAgentRun = { child, transport, textChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, toolStarts: new Map() }; state.activeRun = run; updateWidget();
+		let buffer = ""; const appendActivity = (kind: string, value: unknown) => { const text = String(value ?? "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim(); if (text) state.history = `${state.history}\n${kind}: ${text}`.slice(-5000); };
+		const persistUsage = (kind: string, message: any, usage: any) => { if (!usage || typeof usage !== "object") return; pi.appendEntry("agent-team-usage", { sourceEventId: `${run.runId}:${kind}:${++run.usageSequence}`, usage, provider: message?.provider, model: message?.model }); pi.events.emit("agent-team:usage"); };
+		const handle = (event: any) => { if (transport.handle(event)) return; if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") { const delta = event.assistantMessageEvent.delta || ""; run.textChunks.push(delta); state.lastWork = run.textChunks.join("").split("\n").filter(Boolean).pop() || ""; appendActivity("assistant", delta); updateWidget(); } else if (event.type === "tool_execution_start") { state.toolCount++; const id = event.toolCallId ?? event.id ?? `${event.toolName}:${state.toolCount}`; const summary = formatToolActivity(event.toolName, event.args ?? event.input ?? event.parameters); run.toolStarts.set(id, { summary, startTime: Date.now() }); appendActivity("tool-start", summary); updateWidget(); } else if (event.type === "tool_execution_end") { const id = event.toolCallId ?? event.id; const started = id ? run.toolStarts.get(id) : undefined; const summary = started?.summary ?? formatToolActivity(event.toolName, event.args ?? event.input ?? event.parameters); const elapsed = started ? ` · ${Math.max(0, Math.round((Date.now() - started.startTime) / 1000))}s` : ""; const error = event.error ?? event.result?.error ?? (event.isError ? event.result ?? "tool failed" : undefined); appendActivity(error ? "tool-error" : "tool-done", `${summary}${elapsed}${error ? ` — ${String(error).slice(0, 96)}` : ""}`); updateWidget(); } else if (event.type === "message_end") { const finalText = event.message?.role === "assistant" && !run.textChunks.length ? (typeof event.message.content === "string" ? event.message.content : event.message.content?.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("")) : ""; if (finalText) appendActivity("assistant", finalText); const tokens = contextTokensFromUsage(event.message?.usage); if (tokens !== undefined) state.contextTokens = tokens; persistUsage("message", event.message, event.message?.usage); updateWidget(); } else if (event.type === "compaction_end") persistUsage("compaction", event.result, event.result?.usage); else if (shouldFinalizeAgentEvent(event.type)) finishRun(state, run); };
 		const line = (value: string) => { if (!value.trim()) return; try { handle(JSON.parse(value.endsWith("\r") ? value.slice(0, -1) : value)); } catch {} };
 		child.stdout.setEncoding("utf-8"); child.stdout.on("data", (chunk: string) => { buffer += chunk; let newline; while ((newline = buffer.indexOf("\n")) !== -1) { line(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1); } }); child.stderr.on("data", () => {}); child.stdin.on("error", error => transport.fail(error)); child.on("error", error => { transport.fail(error); if (!run.stopping) finishRun(state, run, new Error(`Agent process error: ${error.message}`)); }); child.on("close", code => { line(buffer); transport.fail(new Error(`Agent process exited with code ${code ?? 1}`)); if (!run.finished && !run.stopping) finishRun(state, run, new Error(`Agent process exited before settling (code ${code ?? 1})`)); });
 		return run;
@@ -294,7 +297,7 @@ export default function (pi: ExtensionAPI) {
 		try {
 			await run.transport.request({ type: "compact" });
 			finishRun(state, run);
-			state.history = latestChildTranscript(run.sessionFile);
+			state.history = latestChildActivity(run.sessionFile);
 			state.contextTokens = latestAssistantContextTokens(run.sessionFile) ?? 0;
 			updateWidget();
 			ctx.ui.notify(`${displayName(state.name)} compacted`, "success");
