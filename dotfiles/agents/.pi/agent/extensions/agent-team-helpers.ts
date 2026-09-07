@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { cleanActivity } from "./lib/agent-activity.ts";
 
 /**
  * Support code for agent-team.ts, not an extension of its own.
@@ -145,9 +146,12 @@ export function addTokenCounts(total: TokenCounts, next: TokenCounts | undefined
 	return next ? { input: total.input + next.input, output: total.output + next.output } : total;
 }
 
+/** 1234 -> "1k", 999 -> "999". Shared by the context and token readouts. */
+export const formatCompactCount = (value: number) =>
+	value >= 1000 ? `${Math.round(value / 1000)}k` : `${Math.round(value)}`;
+
 export function formatAgentTokens(tokens: TokenCounts): string {
-	const format = (value: number) => value >= 1000 ? `${Math.round(value / 1000)}k` : `${Math.round(value)}`;
-	return `↑${format(tokens.input)} ↓${format(tokens.output)}`;
+	return `↑${formatCompactCount(tokens.input)} ↓${formatCompactCount(tokens.output)}`;
 }
 
 export function contextTokensFromUsage(usage: unknown): number | undefined {
@@ -191,7 +195,8 @@ export function sessionTokenCounts(sessionFile: string): TokenCounts {
 	return total;
 }
 
-const cleanActivityText = (value: unknown) => String(value ?? "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim();
+// Same normalisation as everywhere else; see lib/agent-activity.ts for the single definition.
+const cleanActivityText = cleanActivity;
 const shortActivityText = (value: unknown, max = 180) => {
 	const text = cleanActivityText(value); return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 };
@@ -227,6 +232,77 @@ export function latestChildActivity(sessionFile: string, maxEntries = 24): strin
 		} catch {}
 	}
 	return entries.slice(-maxEntries).join("\n").slice(-5000);
+}
+
+/** Everything makeState needs from a child transcript, recovered in one pass. */
+export interface ChildSessionSnapshot {
+	activity: string;
+	contextTokens: number | undefined;
+	tokens: TokenCounts;
+}
+
+/**
+ * Read a child session once instead of three times.
+ *
+ * latestChildActivity, latestAssistantContextTokens and sessionTokenCounts each did their own
+ * readFileSync + JSON.parse of the same file, and makeState called all three per instance — so a
+ * restored team re-parsed every transcript three times at session_start. Those functions remain
+ * for callers that want a single value; this is the combined path.
+ */
+export function readChildSession(sessionFile: string, maxEntries = 24): ChildSessionSnapshot {
+	const empty: ChildSessionSnapshot = { activity: "", contextTokens: undefined, tokens: { input: 0, output: 0 } };
+	if (!existsSync(sessionFile)) return empty;
+	let raw: string;
+	try {
+		raw = readFileSync(sessionFile, "utf-8");
+	} catch {
+		return empty;
+	}
+
+	const activity: string[] = [];
+	const calls = new Map<string, { summary: string; timestamp?: number }>();
+	let contextTokens: number | undefined;
+	let tokens: TokenCounts = { input: 0, output: 0 };
+
+	for (const line of raw.split("\n")) {
+		if (!line) continue;
+		try {
+			const entry = JSON.parse(line);
+
+			// -- token totals (was sessionTokenCounts) --
+			const usage = entry?.type === "message" && (entry.message?.role === "assistant" || entry.message?.role === "toolResult")
+				? entry.message.usage
+				: entry?.type === "compaction" || entry?.type === "branch_summary" ? entry.usage : undefined;
+			tokens = addTokenCounts(tokens, tokenCountsFromUsage(usage));
+
+			const message = entry?.message;
+			if (!message) continue;
+
+			// -- last assistant context size (was latestAssistantContextTokens) --
+			if (entry.type === "message" && message.role === "assistant") {
+				const latest = contextTokensFromUsage(message.usage);
+				if (latest !== undefined) contextTokens = latest;
+			}
+
+			// -- timeline (was latestChildActivity) --
+			const timestamp = Date.parse(entry.timestamp ?? message.timestamp ?? "") || undefined;
+			if (message.role === "user") {
+				const text = typeof message.content === "string" ? message.content : Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join(" ") : "";
+				if (text) activity.push(`user: ${shortActivityText(text)}`);
+			} else if (message.role === "assistant") {
+				if (typeof message.content === "string" && message.content) activity.push(`assistant: ${shortActivityText(message.content)}`);
+				for (const part of Array.isArray(message.content) ? message.content : []) {
+					if (part?.type === "text" && part.text) activity.push(`assistant: ${shortActivityText(part.text)}`);
+					if (part?.type === "toolCall") { const summary = formatToolActivity(part.name, part.arguments); calls.set(part.id, { summary, timestamp }); activity.push(`tool-start: ${summary}`); }
+				}
+			} else if (message.role === "toolResult") {
+				const call = calls.get(message.toolCallId); const elapsed = call?.timestamp && timestamp ? ` · ${Math.max(0, Math.round((timestamp - call.timestamp) / 1000))}s` : "";
+				const error = message.isError ? ` — ${shortActivityText(Array.isArray(message.content) ? message.content.find((part: any) => part?.type === "text")?.text : message.content, 96)}` : "";
+				activity.push(`${message.isError ? "tool-error" : "tool-done"}: ${(call?.summary ?? cleanActivityText(message.toolName)) || "tool"}${elapsed}${error}`);
+			}
+		} catch {}
+	}
+	return { activity: activity.slice(-maxEntries).join("\n").slice(-5000), contextTokens, tokens };
 }
 
 function safePathComponent(value: string, label: string): string {
@@ -286,8 +362,7 @@ export function childSessionPath(root: string, parentSessionId: string, agentNam
 }
 
 export function formatAgentContext(tokens: number, contextWindow: number): string {
-	const format = (value: number) => value >= 1000 ? `${Math.round(value / 1000)}k` : `${Math.round(value)}`;
-	return `${format(tokens)}/${contextWindow > 0 ? format(contextWindow) : "?"}`;
+	return `${formatCompactCount(tokens)}/${contextWindow > 0 ? formatCompactCount(contextWindow) : "?"}`;
 }
 
 type PendingRpc = {

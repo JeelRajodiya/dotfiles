@@ -8,9 +8,9 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
 	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, canClearAgent, canInterruptAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
-	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity,
+	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, latestChildActivity, readChildSession,
 	OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent, shouldIgnoreAgentRunEvent,
-	restoreWaitingAgents, rootTools, sessionTokenCounts, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
+	restoreWaitingAgents, rootTools, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
 	terminateChild, type AgentCompletionStatus, type TokenCounts,
 } from "./agent-team-helpers.ts";
 import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity.ts";
@@ -122,8 +122,10 @@ export default function (pi: ExtensionAPI) {
 		// would otherwise throw from session_start and take the whole extension down with it.
 		const sessionKey = rawSessionKey.toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "agent";
 		const provisional = { name, def, sessionKey } as AgentState; const file = sessionPath(provisional);
-		return { name, def, goal, status: "idle", task: "", toolCount: 0, elapsed: 0, lastWork: "", activity: ActivityLog.parse(latestChildActivity(file)),
-			contextTokens: latestAssistantContextTokens(file) ?? 0, contextWindow: modelWindow(def.model ?? parentModel(widgetCtx), widgetCtx), tokens: sessionTokenCounts(file),
+		// One pass over the transcript; three separate reads here showed up at every session_start.
+		const restored = readChildSession(file);
+		return { name, def, goal, status: "idle", task: "", toolCount: 0, elapsed: 0, lastWork: "", activity: ActivityLog.parse(restored.activity),
+			contextTokens: restored.contextTokens ?? 0, contextWindow: modelWindow(def.model ?? parentModel(widgetCtx), widgetCtx), tokens: restored.tokens,
 			sessionFile: existsSync(file) ? file : null, runCount: 0, autoName, sessionKey };
 	}
 	function persistTeam() {
@@ -506,8 +508,12 @@ export default function (pi: ExtensionAPI) {
 		try {
 			await run.transport.request({ type: "compact" });
 			finishRun(state, run);
-			state.activity = ActivityLog.parse(latestChildActivity(run.sessionFile));
-			state.contextTokens = latestAssistantContextTokens(run.sessionFile) ?? 0;
+			// One pass, and it refreshes the token totals too — compaction rewrites those, and
+			// reading only activity + contextTokens left the card showing pre-compaction counts.
+			const compacted = readChildSession(run.sessionFile);
+			state.activity = ActivityLog.parse(compacted.activity);
+			state.contextTokens = compacted.contextTokens ?? 0;
+			state.tokens = compacted.tokens;
 			updateWidget();
 			ctx.ui.notify(`${displayName(state.name)} compacted`, "success");
 		} catch (error) {
@@ -528,6 +534,17 @@ export default function (pi: ExtensionAPI) {
 	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | interrupt <agent> | clear <subagent-name> | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | fast <name> [on|off] | view <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
+	const teamSnapshot = (teamName: string | undefined): SavedTeam => {
+		const team = teamName ? teams[teamName] : undefined;
+		const instances: SavedInstance[] = [];
+		for (const member of team?.members ?? []) {
+			const def = definitionFor(member);
+			if (def && !instances.some(instance => key(instance.name) === key(def.name))) instances.push({ name: def.name, type: def.name, goal: def.description });
+		}
+		const root = team?.root && definitionFor(team.root);
+		if (root && !instances.some(instance => key(instance.name) === key(root.name))) instances.push({ name: root.name, type: root.name, goal: root.description });
+		return { instances, root: root?.name };
+	};
 	async function activateTeam(teamName: string | undefined, ctx: any) {
 		for (const state of agentStates.values()) { if (state.activeRun) terminateRun(state.activeRun); clearInterval(state.timer); state.timer = undefined; discardSession(state); }
 		agentStates.clear(); agentModelOverrides.clear(); agentFastOverrides.clear(); rootAgent = undefined; viewedAgent = undefined; rootModelRestored = true;
@@ -662,10 +679,26 @@ export default function (pi: ExtensionAPI) {
 			if (command === "team") {
 				const selected = Object.keys(teams).find(team => key(team) === key(rest[0] || ""));
 				if (rest.length !== 1 || rest[0] !== "off" && !selected) return void ctx.ui.notify("Usage: /agents team <team-name|off>", "error");
-				// Switching teams throws away every instance, transcript and model override, so ask first.
 				if (agentStates.size) {
-					const confirm = await ctx.ui.select(`Replace the current team? ${agentStates.size} instance(s), their transcripts and model overrides are discarded.`, ["Cancel", selected ? `Switch to ${selected}` : "Disable the team"]);
-					if (!confirm || confirm === "Cancel") return;
+					const choice = await ctx.ui.select("Switch team session?", ["start fresh", "fork current session"]);
+					if (!choice) return;
+					const snapshot = teamSnapshot(selected);
+					if (choice === "start fresh") {
+						await ctx.newSession({ parentSession: ctx.sessionManager.getSessionFile(), setup: async sessionManager => {
+							sessionManager.appendCustomEntry("agent-team-instances", snapshot);
+							sessionManager.appendCustomEntry("agent-team-model-overrides", { overrides: {} });
+							sessionManager.appendCustomEntry("agent-team-fast-overrides", { overrides: {} });
+						} });
+						return;
+					}
+					await ctx.fork(ctx.sessionManager.getLeafId()!, { position: "at", withSession: async replacementCtx => {
+						replacementCtx.sessionManager.appendCustomEntry("agent-team-instances", snapshot);
+						replacementCtx.sessionManager.appendCustomEntry("agent-team-model-overrides", { overrides: {} });
+						replacementCtx.sessionManager.appendCustomEntry("agent-team-fast-overrides", { overrides: {} });
+						await replacementCtx.reload();
+						return;
+					} });
+					return;
 				}
 				try { await activateTeam(selected, ctx); ctx.ui.notify(selected ? `Team: ${selected}` : "Team disabled", "info"); } catch (error) { fail(error); }
 				return;
