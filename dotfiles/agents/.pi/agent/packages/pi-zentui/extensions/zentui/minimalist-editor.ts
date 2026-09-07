@@ -176,7 +176,6 @@ function renderTopRight(
 	config: ZentuiConfig,
 	availableWidth: number,
 	renderBorder: (text: string) => string,
-	renderThinking: (text: string) => string,
 ): string {
 	const source = config.components.editor.colorSource;
 	const parts: string[] = [];
@@ -187,22 +186,6 @@ function renderTopRight(
 		: "";
 	if (cost) {
 		parts.push(renderStyleForSource(uiTheme, source, config.colors.cost, cost));
-	}
-	const model = sanitizeEditorMetadataText(metadata.modelLabel ?? "");
-	if (model) {
-		parts.push(
-			renderStyleForSourceOrFallback(
-				uiTheme,
-				source,
-				config.colors.editorModel,
-				MINIMALIST_MODEL_FALLBACK,
-				model,
-			),
-		);
-	}
-	const thinking = sanitizeEditorMetadataText(metadata.thinkingLevel ?? "");
-	if (thinking && thinking.toLowerCase() !== "off") {
-		parts.push(renderThinking(thinking));
 	}
 	if (metadata.contextPercent !== undefined && Number.isFinite(metadata.contextPercent)) {
 		const percent = Math.round(Math.max(0, Math.min(999, metadata.contextPercent)));
@@ -241,7 +224,7 @@ function renderTopRight(
 	return joinParts(parts);
 }
 
-function renderBottomLeft(
+function renderGitMetadata(
 	metadata: MinimalistEditorMetadata,
 	uiTheme: Theme,
 	config: ZentuiConfig,
@@ -272,6 +255,32 @@ function renderBottomLeft(
 	return parts.join(" ");
 }
 
+function renderBottomLeft(
+	metadata: MinimalistEditorMetadata,
+	uiTheme: Theme,
+	config: ZentuiConfig,
+	renderBorder: (text: string) => string,
+	renderThinking: (text: string) => string,
+): string {
+	const source = config.components.editor.colorSource;
+	const parts: string[] = [];
+	const model = sanitizeEditorMetadataText(metadata.modelLabel ?? "");
+	if (model) {
+		parts.push(
+			renderStyleForSourceOrFallback(
+				uiTheme,
+				source,
+				config.colors.editorModel,
+				MINIMALIST_MODEL_FALLBACK,
+				model,
+			),
+		);
+	}
+	const thinking = sanitizeEditorMetadataText(metadata.thinkingLevel ?? "");
+	if (thinking && thinking.toLowerCase() !== "off") parts.push(renderThinking(thinking));
+	return parts.map((part, index) => (index ? `${renderBorder(" – ")}${part}` : part)).join("");
+}
+
 function minimalistCwdLabel(metadata: MinimalistEditorMetadata, config: ZentuiConfig): string {
 	const full = () => formatCwdLabel(metadata.cwd, "", { mode: "full", depth: 0 });
 	if (config.components.editor.styles.minimalist.pathDisplay === "full") return full();
@@ -292,10 +301,13 @@ function renderBottomRight(
 	uiTheme: Theme,
 	config: ZentuiConfig,
 ): string {
+	const source = config.components.editor.colorSource;
+	const parts: string[] = [];
 	const cwd = sanitizeEditorMetadataText(minimalistCwdLabel(metadata, config));
-	return cwd
-		? renderStyleForSource(uiTheme, config.components.editor.colorSource, config.colors.cwd, cwd)
-		: "";
+	if (cwd) parts.push(renderStyleForSource(uiTheme, source, config.colors.cwd, cwd));
+	const git = renderGitMetadata(metadata, uiTheme, config);
+	if (git) parts.push(git);
+	return parts.join("  ");
 }
 
 function renderLabeledBorder(options: {
@@ -435,12 +447,12 @@ export function renderMinimalistFrame({
 		width,
 		left: topLeft,
 		leftFallbacks: topFallbacks,
-		right: renderTopRight(metadata, uiTheme, config, topRightBudget, renderBorder, renderThinking),
+		right: renderTopRight(metadata, uiTheme, config, topRightBudget, renderBorder),
 		leftCorner: "╭",
 		rightCorner: "╮",
 		renderBorder,
 	});
-	const bottomMetadata = renderBottomLeft(metadata, uiTheme, config);
+	const bottomMetadata = renderBottomLeft(metadata, uiTheme, config, renderBorder, renderThinking);
 	const bottomViewport = viewportLabel("below", viewport?.below);
 	const bottom = renderLabeledBorder({
 		width,
