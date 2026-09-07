@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
-import { resultDeliveryStatus, rootTools } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
+import { canClearAgent, parseTellArguments, resultDeliveryStatus, rootTools, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
 import { renderCard } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
 
 assert.deepEqual(parseTeams("flat:\n  - planner\n  - builder\nrooted:\n  main: understand\n  subs:\n    - iterate\n"), {
@@ -16,6 +16,17 @@ assert.deepEqual(rootTools(["read", "bash", "grep"], ["dispatch_agent", "set_age
 assert.equal(resultDeliveryStatus("done", true), "waiting");
 assert.equal(resultDeliveryStatus("error", true), "waiting");
 assert.equal(resultDeliveryStatus("error", false), "error");
+assert.deepEqual(parseTellArguments("iterate review the current diff"), { agent: "iterate", message: "review the current diff" });
+assert.deepEqual(parseTellArguments("  iterate   check status  "), { agent: "iterate", message: "check status" });
+assert.equal(parseTellArguments("iterate"), undefined);
+assert.equal(parseTellArguments("   "), undefined);
+assert.equal(shouldCompleteTellTarget(["tell"], true), true);
+assert.equal(shouldCompleteTellTarget(["tell", "iterate"], false), true);
+assert.equal(shouldCompleteTellTarget(["tell", "iterate"], true), false);
+assert.equal(canClearAgent("done", false), true);
+assert.equal(canClearAgent("running", false), false);
+assert.equal(canClearAgent("waiting", false), false);
+assert.equal(canClearAgent("idle", true), false);
 
 const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 const waitingCard = renderCard({

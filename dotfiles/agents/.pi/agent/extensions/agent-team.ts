@@ -7,8 +7,8 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
-	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, childSessionPath, contextTokensFromUsage, encodeCwd,
-	formatToolActivity, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity, pruneSessionDirs, resultDeliveryStatus, rootTools, sessionTokenCounts, shouldFinalizeAgentEvent, terminateChild, type AgentCompletionStatus, type TokenCounts,
+	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, canClearAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
+	formatToolActivity, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, rootTools, sessionTokenCounts, shouldCompleteTellTarget, shouldFinalizeAgentEvent, terminateChild, type AgentCompletionStatus, type TokenCounts,
 } from "./agent-team-helpers";
 import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity";
 import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs";
@@ -213,6 +213,20 @@ export default function (pi: ExtensionAPI) {
 	/** Drop a child transcript that is no longer reachable through any instance. */
 	function discardSession(state: AgentState) {
 		try { rmSync(sessionPath(state), { force: true }); } catch {}
+	}
+	function clearAgent(state: AgentState) {
+		discardSession(state);
+		state.sessionFile = null;
+		state.contextTokens = 0;
+		state.tokens = { input: 0, output: 0 };
+		state.activity = ActivityLog.parse("");
+		state.task = "";
+		state.lastWork = "";
+		state.toolCount = 0;
+		state.elapsed = 0;
+		state.status = "idle";
+		state.pendingOutcome = undefined;
+		updateWidget();
 	}
 	function removeAgent(state: AgentState, ctx: any) {
 		if (state === rootAgent) throw new Error("Cannot remove the promoted root; demote it first");
@@ -426,7 +440,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.registerTool({ name: "set_agent_model", label: "Set Agent Model", description: "Set a session model for a named dynamic instance.", parameters: Type.Object({ agent: Type.String(), model: Type.String() }), async execute(_id, params, _signal, _update, ctx) { const { agent, model } = params as { agent: string; model: string }; const state = stateFor(agent); if (!state) throw new Error(`Unknown dynamic instance "${agent}"`); if (state === rootAgent) throw new Error("Change the root model with /agents model <name> <model|inherit> when the host is idle"); return { content: [{ type: "text", text: `${state.name}: ${setInstanceModel(state, model, ctx)}` }], details: { agent: state.name } }; } });
 
-	const usage = "Usage: /agents add <type|custom> [name] | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | view <name> | exit | grid <1-6> | team <team-name|off>";
+	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | clear <subagent-name> | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | view <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
 	async function activateTeam(teamName: string | undefined, ctx: any) {
@@ -453,8 +467,10 @@ export default function (pi: ExtensionAPI) {
 			const matches = choices.filter(value => value.toLowerCase().startsWith(current.toLowerCase())).map(value => ({ value: `${base}${value}`, label: value }));
 			return matches.length ? matches : null;
 		};
-		if (!command || parts.length === 1 && !trailing) return values(["add", "remove", "compact", "promote", "list", "model", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
+		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "clear", "remove", "compact", "promote", "list", "model", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
 		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...predefinedDefs().map(def => def.name), "custom"], "add ").map(item => item.label === "custom" ? { ...item, label: "Custom…" } : item);
+		if (command === "tell" && shouldCompleteTellTarget(parts, trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "waiting").map(state => state.name), "tell ");
+		if (command === "clear" && (parts.length === 1 && trailing || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => canClearAgent(state.status, state === rootAgent)).map(state => state.name), "clear ");
 		if (command === "remove" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running").map(state => state.name), "remove ");
 		if (command === "compact" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent).map(state => state.name), "compact ");
 		if (command === "promote" && (parts.length === 1 || parts.length === 2 && !trailing)) {
@@ -484,6 +500,27 @@ export default function (pi: ExtensionAPI) {
 			if (!command || command === "list" && !rest.length) return listInstances(ctx);
 			if (command === "grid") { const value = rest[0] || ""; if (!/^[1-6]$/.test(value) || rest.length !== 1) return void ctx.ui.notify("Usage: /agents grid <1-6>", "error"); gridCols = Number(value); updateWidget(); return; }
 			if (command === "add") { try { await addAgent(rest, ctx, "/agents add"); } catch (error) { fail(error); } return; }
+			if (command === "tell") {
+				const tell = parseTellArguments(args.trim().slice(command.length));
+				if (!tell) return void ctx.ui.notify("Usage: /agents tell <subagent-name> <message...>", "error");
+				const state = stateFor(tell.agent);
+				if (!state) return void ctx.ui.notify(`Unknown subagent "${tell.agent}". Usage: /agents tell <subagent-name> <message...>`, "error");
+				if (state === rootAgent) return void ctx.ui.notify("Cannot tell the promoted root agent.", "error");
+				try {
+					const submitted = await submitAgent(state.name, tell.message, ctx);
+					ctx.ui.notify(`${displayName(state.name)} ${submitted.status === "steered" ? "steering accepted" : "started"}`, "info");
+				} catch (error) { fail(error); }
+				return;
+			}
+			if (command === "clear") {
+				const state = stateFor(name);
+				if (!name || !state) return void ctx.ui.notify("Usage: /agents clear <subagent-name>", "error");
+				if (state === rootAgent) return void ctx.ui.notify("Cannot clear the promoted root agent.", "error");
+				if (!canClearAgent(state.status, false)) return void ctx.ui.notify(`${displayName(state.name)} is ${state.status}; wait before clearing it.`, "error");
+				clearAgent(state);
+				ctx.ui.notify(`${displayName(state.name)} cleared`, "info");
+				return;
+			}
 			if (command === "remove") { const state = stateFor(name); if (!state) return void ctx.ui.notify(`Unknown instance "${name}". Usage: /agents remove <name>`, "error"); try { removeAgent(state, ctx); } catch (error) { fail(error); } return; }
 			if (command === "compact") { if (!name) return void ctx.ui.notify("Usage: /agents compact <name>", "error"); try { await compactAgent(name, ctx); } catch (error) { fail(error); } return; }
 			if (command === "promote") {

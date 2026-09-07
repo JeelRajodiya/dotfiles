@@ -16,6 +16,20 @@ export function rootTools(hostTools: string[], teamTools: string[]): string[] {
 	return [...new Set([...hostTools, ...teamTools])];
 }
 
+export function parseTellArguments(value: string): { agent: string; message: string } | undefined {
+	const match = value.trim().match(/^(\S+)\s+([\s\S]*\S)$/);
+	return match ? { agent: match[1], message: match[2] } : undefined;
+}
+
+/** Complete only the target; text after it belongs verbatim to the subagent. */
+export function shouldCompleteTellTarget(parts: readonly string[], trailing: boolean): boolean {
+	return parts.length === 1 && trailing || parts.length === 2 && !trailing;
+}
+
+export function canClearAgent(status: string, isRoot: boolean): boolean {
+	return !isRoot && status !== "running" && status !== "waiting";
+}
+
 export const AGENT_VIEW_COMMAND = "view";
 export const isAgentViewCommand = (command: string): boolean => command === AGENT_VIEW_COMMAND;
 export type TokenCounts = { input: number; output: number };
