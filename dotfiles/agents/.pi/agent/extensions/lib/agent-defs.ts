@@ -76,24 +76,32 @@ export function scanAgentDirs(cwd: string, agentDir: string): AgentDef[] {
 	return defs;
 }
 
-/** Minimal reader for the flat `team:\n  - member` shape teams.yaml uses. */
-export function parseTeams(text: string): Record<string, string[]> {
-	const teams: Record<string, string[]> = {};
+/** A flat team, or one with a visible root and dispatchable members. */
+export interface TeamDef {
+	members: string[];
+	root?: string;
+}
+
+/** Minimal reader for flat `team:\n  - member` and rooted `team:\n  main: root\n  subs:\n    - member` shapes. */
+export function parseTeams(text: string): Record<string, TeamDef> {
+	const teams: Record<string, TeamDef> = {};
 	let current: string | undefined;
 	for (const line of text.split("\n")) {
 		const heading = line.match(/^(\S[^:]*):\s*$/);
 		if (heading) {
 			current = heading[1].trim();
-			teams[current] = [];
+			teams[current] = { members: [] };
 			continue;
 		}
+		const root = current && line.match(/^\s+main:\s*(.+?)\s*$/)?.[1]?.trim();
+		if (root && current) teams[current].root = root;
 		const member = current && line.match(/^\s+-\s+(.+)$/)?.[1]?.trim();
-		if (member && current) teams[current].push(member);
+		if (member && current) teams[current].members.push(member);
 	}
 	return teams;
 }
 
-export function scanTeams(cwd: string, agentDir: string): Record<string, string[]> {
+export function scanTeams(cwd: string, agentDir: string): Record<string, TeamDef> {
 	const file = [join(cwd, ".pi", "agents", "teams.yaml"), join(agentDir, "agents", "teams.yaml")].find(existsSync);
 	if (!file) return {};
 	try {

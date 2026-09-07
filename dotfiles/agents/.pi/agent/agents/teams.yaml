@@ -4,5 +4,6 @@ plan-build:
   - reviewer
 
 understand-iterate:
-  - understand
-  - iterate
+  main: understand
+  subs:
+    - iterate

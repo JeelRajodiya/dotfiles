@@ -11,7 +11,7 @@ import {
 	formatToolActivity, latestAssistantContextTokens, latestChildActivity, pruneSessionDirs, shouldFinalizeAgentEvent, terminateChild,
 } from "./agent-team-helpers";
 import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity";
-import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef } from "./lib/agent-defs";
+import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs";
 import { FRAME_MS, renderDetail, renderEmpty, renderGrid } from "./lib/agent-render";
 
 interface ActiveAgentRun {
@@ -37,7 +37,7 @@ const normalizeName = (name: string) => name.trim().toLowerCase().replace(/\s+/g
 export default function (pi: ExtensionAPI) {
 	const agentStates = new Map<string, AgentState>();
 	const agentModelOverrides = new Map<string, string>();
-	let allAgentDefs: AgentDef[] = []; let teams: Record<string, string[]> = {};
+	let allAgentDefs: AgentDef[] = []; let teams: Record<string, TeamDef> = {};
 	let widgetCtx: any; let sessionDir = ""; let parentSessionId = "";
 	let viewedAgent: AgentState | undefined; let rootAgent: AgentState | undefined;
 	let agentAutocompleteInstalled = false; let gridCols = 3; let rootStartTime = 0;
@@ -119,7 +119,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		const legacy = entries.filter((entry: any) => entry.type === "custom" && entry.customType === "agent-team-mode").pop()?.data as LegacyTeamMode | undefined;
-		if (legacy?.team) for (const member of teams[legacy.team] ?? []) {
+		if (legacy?.team) for (const member of teams[legacy.team]?.members ?? []) {
 			const def = definitionFor(member);
 			if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
 		}
@@ -407,14 +407,21 @@ export default function (pi: ExtensionAPI) {
 	const usage = "Usage: /agents add <type|custom> [name] | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | detail <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
-	function activateTeam(teamName: string | undefined, ctx: any) {
+	async function activateTeam(teamName: string | undefined, ctx: any) {
 		for (const state of agentStates.values()) { if (state.activeRun) terminateRun(state.activeRun); clearInterval(state.timer); state.timer = undefined; discardSession(state); }
 		agentStates.clear(); agentModelOverrides.clear(); rootAgent = undefined; viewedAgent = undefined; rootModelRestored = true;
-		for (const member of teamName ? teams[teamName] ?? [] : []) {
+		const team = teamName ? teams[teamName] : undefined;
+		for (const member of team?.members ?? []) {
 			const def = definitionFor(member);
 			if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
 		}
 		pi.appendEntry("agent-team-model-overrides", { overrides: {} }); persistTeam(); applyActiveTools();
+		if (team?.root) {
+			const def = definitionFor(team.root);
+			if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
+			const root = stateFor(team.root);
+			if (root) await promote(root, ctx);
+		}
 		updateWidget(); syncStatus(ctx);
 	}
 	const getAgentArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
@@ -489,7 +496,7 @@ export default function (pi: ExtensionAPI) {
 					const confirm = await ctx.ui.select(`Replace the current team? ${agentStates.size} instance(s), their transcripts and model overrides are discarded.`, ["Cancel", selected ? `Switch to ${selected}` : "Disable the team"]);
 					if (!confirm || confirm === "Cancel") return;
 				}
-				try { activateTeam(selected, ctx); ctx.ui.notify(selected ? `Team: ${selected}` : "Team disabled", "info"); } catch (error) { fail(error); }
+				try { await activateTeam(selected, ctx); ctx.ui.notify(selected ? `Team: ${selected}` : "Team disabled", "info"); } catch (error) { fail(error); }
 				return;
 			}
 			ctx.ui.notify(usage, "info");
