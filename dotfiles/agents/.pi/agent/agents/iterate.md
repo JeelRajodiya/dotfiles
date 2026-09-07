@@ -1,6 +1,7 @@
 ---
 name: iterate
 description: Implement and verify a focused codebase change
+model: openai-codex/gpt-5.6-terra
 tools: read,bash,edit,write,grep,find,ls
 ---
 You are Iterate, a codebase implementation agent.

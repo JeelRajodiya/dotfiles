@@ -38,6 +38,7 @@ import {
 interface AgentDef {
 	name: string;
 	description: string;
+	model?: string;
 	tools: string;
 	systemPrompt: string;
 	file: string;
@@ -109,6 +110,7 @@ function parseAgentFile(filePath: string): AgentDef | null {
 		return {
 			name: frontmatter.name,
 			description: frontmatter.description || "",
+			model: frontmatter.model,
 			tools: frontmatter.tools || "read,grep,find,ls",
 			systemPrompt: match[2].trim(),
 			file: filePath,
@@ -579,9 +581,9 @@ export default function (pi: ExtensionAPI) {
 		if (!state) return { ok: false as const, message: `Agent "${agentName}" not found` };
 
 		const queued = state.status === "running";
-		const model = ctx.model
+		const model = state.def.model ?? (ctx.model
 			? `${ctx.model.provider}/${ctx.model.id}`
-			: "openrouter/google/gemini-3-flash-preview";
+			: "openrouter/google/gemini-3-flash-preview");
 		state.queue.push({ task, model });
 		const position = state.queue.length;
 		if (!queued) runNext(state);
