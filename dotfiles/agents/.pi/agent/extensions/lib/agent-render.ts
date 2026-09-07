@@ -129,6 +129,12 @@ export interface DetailOptions {
 	steerable: boolean;
 }
 
+export function renderThoughtActivity(entry: ActivityEntry, width: number, now?: number): string {
+	const prefix = "  · ";
+	if (width <= visibleWidth(prefix)) return truncateToWidth(prefix, width, "");
+	return `${prefix}${truncateToWidth(thoughtActivityLabel(entry, now), width - visibleWidth(prefix), "…")}`;
+}
+
 /** The expanded single-agent view behind `/agents view <name>`, where prose has room. */
 export function renderDetail(agent: RenderableAgent, width: number, theme: Theme, options: DetailOptions, now?: number): string {
 	const line = (value: string) => truncateToWidth(value, width);
@@ -142,11 +148,15 @@ export function renderDetail(agent: RenderableAgent, width: number, theme: Theme
 		`${Math.round(agent.elapsed / 1000)}s`,
 	].join(" · ");
 
-	const activity = options.activity.map(entry => truncateToWidth(
-		`  ${theme.fg(ACTIVITY_COLOR[entry.kind] ?? "muted", ACTIVITY_GLYPH[entry.kind] ?? "·")} ` +
-		theme.fg(entry.kind === "assistant" ? "text" : "muted", entry.kind === "thought" ? thoughtActivityLabel(entry, now) : entry.text),
-		width,
-	));
+	const activity = options.activity.map(entry =>
+		entry.kind === "thought"
+			? theme.fg("muted", renderThoughtActivity(entry, width, now))
+			: truncateToWidth(
+				`  ${theme.fg(ACTIVITY_COLOR[entry.kind] ?? "muted", ACTIVITY_GLYPH[entry.kind] ?? "·")} ` +
+				theme.fg(entry.kind === "assistant" ? "text" : "muted", entry.text),
+				width,
+			),
+	);
 
 	return [
 		line(`${theme.fg(statusColor(agent.status), statusGlyph(agent.status, now))} ${agentHeading(agent, theme)}  ${theme.fg(contextColor(agent), context)}`),

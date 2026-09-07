@@ -23,6 +23,28 @@ export const cleanActivity = (value: unknown): string =>
 		.replace(/\s+/g, " ")
 		.trim();
 
+/** Strip common Markdown wrappers from reasoning without changing its words. */
+export const cleanThoughtActivity = (value: unknown): string =>
+	cleanActivity(
+		String(value ?? "")
+			.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+			.replace(/^\s{0,3}(?:#{1,6}|>|[-+*])\s+/gm, "")
+			.replace(/(?:\*\*|__|~~|`)/g, "")
+			.replace(/(^|[\s(])([*_])([^*_]+)\2(?=$|[\s).,!?])/g, "$1$3"),
+	);
+
+/** Join streamed or resent reasoning without repeating a shared prefix/suffix. */
+export function mergeThoughtActivity(previous: string, next: string): string {
+	if (!previous || !next) return previous || next;
+	if (previous.includes(next)) return previous;
+	if (next.includes(previous)) return next;
+	const limit = Math.min(previous.length, next.length);
+	for (let length = limit; length > 0; length--) {
+		if (previous.endsWith(next.slice(0, length))) return `${previous}${next.slice(length)}`;
+	}
+	return `${previous} ${next}`;
+}
+
 export function formatActivityDuration(durationMs: number): string {
 	const seconds = Math.max(0, Math.floor(durationMs / 1000));
 	const minutes = Math.floor(seconds / 60);
@@ -48,6 +70,10 @@ export class ActivityLog {
 	}
 
 	append(kind: ActivityKind, value: unknown): void {
+		if (kind === "thought") {
+			this.appendThought(value);
+			return;
+		}
 		const text = cleanActivity(value);
 		if (!text || /^[{[]/.test(text)) return;
 		const last = this.entries.at(-1);
@@ -67,12 +93,12 @@ export class ActivityLog {
 	}
 
 	appendThought(value: unknown): void {
-		const text = cleanActivity(value);
+		const text = cleanThoughtActivity(value);
 		if (!text) return;
 		const last = this.entries.at(-1);
 		if (last?.kind !== "thought" || last.finishedAt) this.startThought();
 		const thought = this.entries.at(-1)!;
-		thought.text = this.clamp(`${thought.text} ${text}`.replace(/\s+/g, " ").trim());
+		thought.text = this.clamp(mergeThoughtActivity(thought.text, text));
 	}
 
 	finishThought(value: unknown, now = Date.now()): void {
