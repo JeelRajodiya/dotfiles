@@ -1,0 +1,8 @@
+plan-build:
+  - planner
+  - builder
+  - reviewer
+
+understand-iterate:
+  - understand
+  - iterate

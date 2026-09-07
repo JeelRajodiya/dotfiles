@@ -1,10 +1,19 @@
 {
   "components": {
+    "editor": {
+      "style": "minimalist"
+    },
     "footer": {
       "style": "starship",
       "styles": {
         "starship": {
           "segments": {
+            "cwd": false,
+            "gitBranch": false,
+            "gitStatus": false,
+            "gitCounts": false,
+            "gitCommit": false,
+            "gitMetrics": false,
             "tokens": false,
             "cost": false
           },
