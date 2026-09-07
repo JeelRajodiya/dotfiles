@@ -30,6 +30,41 @@ export function canClearAgent(status: string, isRoot: boolean): boolean {
 	return !isRoot && status !== "running" && status !== "waiting";
 }
 
+export const OPENAI_FAST_ENV = "PI_AGENT_OPENAI_FAST";
+
+/**
+ * Parse the child-only OpenAI fast override variable. Only accepts `on`/`off`.
+ * Empty/unknown values are ignored and treated as “not set”.
+ */
+export function parseOpenAIFastEnvValue(value: string | undefined): boolean | undefined {
+	if (value === undefined) return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "on") return true;
+	if (normalized === "off") return false;
+	return undefined;
+}
+
+/** Extract the provider portion of `provider/model` IDs. */
+export const modelProvider = (model: string): string | undefined => {
+	const slash = model.indexOf("/");
+	return slash > 0 ? model.slice(0, slash) : undefined;
+};
+
+export const modelBaseName = (model: string): string => {
+	const slash = model.indexOf("/");
+	return slash > 0 ? model.slice(slash + 1) : model;
+};
+
+export const supportsFastModel = (model: string): boolean => {
+	const provider = modelProvider(model);
+	return provider === "openai" || provider === "openai-codex";
+};
+
+export function formatAgentModelLabel(model: string, fast?: boolean): string {
+	const label = modelBaseName(model);
+	return supportsFastModel(model) && fast ? `${label} (fast)` : label;
+}
+
 export const AGENT_VIEW_COMMAND = "view";
 export const isAgentViewCommand = (command: string): boolean => command === AGENT_VIEW_COMMAND;
 export type TokenCounts = { input: number; output: number };

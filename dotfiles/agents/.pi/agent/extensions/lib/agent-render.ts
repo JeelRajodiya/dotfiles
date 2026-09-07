@@ -3,7 +3,7 @@
  * can be exercised without spawning a child agent or standing up a Pi session.
  */
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { formatAgentContext, formatAgentTokens, type TokenCounts } from "../agent-team-helpers.ts";
+import { formatAgentModelLabel, formatAgentContext, formatAgentTokens, type TokenCounts } from "../agent-team-helpers.ts";
 import { thoughtActivityLabel, type ActivityEntry } from "./agent-activity.ts";
 
 export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
@@ -21,10 +21,12 @@ export interface RenderableAgent {
 	contextWindow: number;
 	tokens: TokenCounts;
 	pendingOutcome?: "done" | "error";
+	model: string;
+	fast?: boolean;
 }
 
 /** Card geometry. renderGrid pads short columns to CARD_LINES, so keep the two in step. */
-export const CARD_LINES = 3;
+export const CARD_LINES = 4;
 export const MIN_CARD_WIDTH = 20;
 export const CARD_GAP = 1;
 export const FRAME_MS = 80;
@@ -66,40 +68,32 @@ export function agentHeading(agent: RenderableAgent, theme: Theme): string {
 }
 
 /**
- * One agent as a single-row card:
- *
- *   ╭─────────────────────────────╮
- *   │ ⠹ planner  42k/200k  7 · 14s│   glyph, name, context, tools · elapsed
- *   ╰─────────────────────────────╯
- *
- * Deliberately just identity and vitals. The goal and current task are prose that never fits
- * a column, so they live in the detail view, which keeps cards narrow enough to sit three across.
+ * One agent as a compact four-line card: identity/vitals and usage/model always get a row each.
  */
 export function renderCard(agent: RenderableAgent, width: number, theme: Theme, now?: number): string[] {
 	const cardWidth = Math.max(MIN_CARD_WIDTH, width);
 	const inner = cardWidth - 4;
 	const rule = (left: string, right: string) => theme.fg("dim", left + "─".repeat(cardWidth - 2) + right);
+	const row = (content: string) => theme.fg("dim", "│") + " " + truncateToWidth(content, inner) + " ".repeat(Math.max(0, inner - visibleWidth(content))) + " " + theme.fg("dim", "│");
 
 	const label = agent.name.toLowerCase() === agent.def.name.toLowerCase() ? "" : theme.fg("dim", ` ${agent.def.name}`);
 	const name = `${theme.fg(statusColor(agent.status), statusGlyph(agent.status, now))} ${theme.bold(theme.fg("accent", agent.name))}${label}`;
-	const context = formatAgentContext(agent.contextTokens, agent.contextWindow);
+	const context = theme.fg(contextColor(agent), formatAgentContext(agent.contextTokens, agent.contextWindow));
+	const waiting = agent.status === "waiting" ? agent.pendingOutcome === "error" ? "return error" : "returning" : "";
+	const elapsed = agent.status === "running" || agent.elapsed ? `${Math.round(agent.elapsed / 1000)}s` : "";
+	const telemetry = [agent.toolCount || "", waiting, elapsed].filter(Boolean).join(" · ");
+	// On narrow cards, keep the waiting/elapsed state before a tool count that would crowd it out.
+	const vital = visibleWidth(telemetry) <= inner - 4 ? telemetry : waiting || elapsed || truncateToWidth(String(agent.toolCount), Math.max(1, inner - 4));
+	const identityLeft = `${name} ${context}`;
 	const tokens = formatAgentTokens(agent.tokens);
-	const usage = `${theme.fg(contextColor(agent), context)} ${theme.fg("dim", tokens)}`;
-	const trailing = [
-		agent.toolCount || "",
-		agent.status === "waiting" ? agent.pendingOutcome === "error" ? "return error" : "returning" : "",
-		agent.status === "running" || agent.elapsed ? `${Math.round(agent.elapsed / 1000)}s` : "",
-	].filter(Boolean).join(" · ");
-
-	// The name gives up width first so the context figure always survives on a narrow card.
-	const nameWidth = Math.max(3, inner - visibleWidth(usage) - visibleWidth(trailing) - (trailing ? 4 : 2));
-	const content = spread(
-		`${truncateToWidth(name, nameWidth)}  ${usage}`,
-		theme.fg("dim", trailing),
-		inner,
-	);
-	const row = theme.fg("dim", "│") + " " + content + " ".repeat(Math.max(0, inner - visibleWidth(content))) + " " + theme.fg("dim", "│");
-	return [rule("╭", "╮"), row, rule("╰", "╯")].map(line => truncateToWidth(line, cardWidth));
+	const model = formatAgentModelLabel(agent.model, agent.fast);
+	const identityWidth = Math.max(1, inner - visibleWidth(vital) - 1);
+	const compactIdentity = visibleWidth(identityLeft) <= identityWidth ? identityLeft
+		: `${theme.fg(statusColor(agent.status), statusGlyph(agent.status, now))} ${theme.bold(theme.fg("accent", truncateToWidth(agent.name, Math.max(1, identityWidth - 2))))}`;
+	const identity = vital ? spread(compactIdentity, vital, inner) : truncateToWidth(identityLeft, inner);
+	// At three 26-column cards, bare arrows make room for the complete fast model label.
+	const usage = `${visibleWidth(`${tokens} ${model}`) <= inner ? tokens : "↑↓"} ${model}`;
+	return [rule("╭", "╮"), row(identity), row(theme.fg("dim", usage)), rule("╰", "╯")].map(line => truncateToWidth(line, cardWidth));
 }
 
 /** Lay cards out in up to `columns` columns, dropping to fewer when the terminal is narrow. */

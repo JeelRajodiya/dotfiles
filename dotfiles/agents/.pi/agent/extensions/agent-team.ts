@@ -8,7 +8,10 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
 	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, canClearAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
-	formatToolActivity, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent, restoreWaitingAgents, rootTools, sessionTokenCounts, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent, terminateChild, type AgentCompletionStatus, type TokenCounts,
+	formatAgentModelLabel, formatToolActivity, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity,
+	OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent,
+	restoreWaitingAgents, rootTools, sessionTokenCounts, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
+	terminateChild, type AgentCompletionStatus, type TokenCounts,
 } from "./agent-team-helpers.ts";
 import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity.ts";
 import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs.ts";
@@ -17,7 +20,7 @@ import { FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } fro
 interface ActiveAgentRun {
 	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; text: TextTail; stderrChunks: string[]; initialTask: string;
 	sessionFile: string; startTime: number; runId: string; usageSequence: number; accepted: boolean; finished: boolean; stopping: boolean;
-	output: OutputBuffer; toolStarts: Map<string, { summary: string; startTime: number }>;
+	output: OutputBuffer; toolStarts: Map<string, { summary: string; startTime: number }>; fast: boolean;
 }
 interface AgentState {
 	name: string; def: AgentDef; goal: string; status: AgentStatus; pendingOutcome?: AgentCompletionStatus; task: string;
@@ -26,6 +29,7 @@ interface AgentState {
 }
 type SavedInstance = { name: string; type: string; goal: string; autoName?: boolean; sessionKey?: string };
 type SavedTeam = { instances: SavedInstance[]; root?: string };
+type SavedAgentFastOverrides = { overrides?: Record<string, boolean> };
 type LegacyTeamMode = { team?: string | null };
 
 const TEAM_TOOLS = ["dispatch_agent", "set_agent_model"];
@@ -37,6 +41,7 @@ const normalizeName = (name: string) => name.trim().toLowerCase().replace(/\s+/g
 export default function (pi: ExtensionAPI) {
 	const agentStates = new Map<string, AgentState>();
 	const agentModelOverrides = new Map<string, string>();
+	const agentFastOverrides = new Map<string, boolean>();
 	let allAgentDefs: AgentDef[] = []; let teams: Record<string, TeamDef> = {};
 	let widgetCtx: any; let sessionDir = ""; let parentSessionId = "";
 	let viewedAgent: AgentState | undefined; let rootAgent: AgentState | undefined;
@@ -57,6 +62,19 @@ export default function (pi: ExtensionAPI) {
 	};
 	const parentModel = (ctx: any) => ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "openrouter/google/gemini-3-flash-preview";
 	const effectiveModel = (state: AgentState, ctx: any) => agentModelOverrides.get(key(state.name)) ?? state.def.model ?? parentModel(ctx);
+	const hostFastMode = (ctx: any): boolean => {
+		const entries = ctx.sessionManager.getEntries() as { type?: string; customType?: string; data?: { enabled?: boolean } }[];
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry?.type === "custom" && entry.customType === "openai-fast") return entry.data?.enabled === true;
+		}
+		return false;
+	};
+	const effectiveFast = (state: AgentState, ctx: any) => {
+		if (state === rootAgent) return hostFastMode(ctx);
+		const fast = agentFastOverrides.get(key(state.name));
+		return fast === undefined ? hostFastMode(ctx) : fast;
+	};
 	const modelWindow = (model: string, ctx: any) => {
 		const slash = model.indexOf("/"); return slash > 0 ? ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))?.contextWindow ?? 0 : 0;
 	};
@@ -75,6 +93,11 @@ export default function (pi: ExtensionAPI) {
 		state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx);
 		updateWidget();
 		return modelSetting(state, ctx);
+	}
+	function setInstanceFast(state: AgentState, enabled: boolean) {
+		agentFastOverrides.set(key(state.name), enabled);
+		pi.appendEntry("agent-team-fast-overrides", { overrides: Object.fromEntries(agentFastOverrides) });
+		updateWidget();
 	}
 	async function setRootModel(state: AgentState, requested: string, ctx: any): Promise<string> {
 		const modelName = requested === "inherit" ? state.def.model ?? parentModel(ctx) : requested;
@@ -180,10 +203,19 @@ export default function (pi: ExtensionAPI) {
 	}
 	function renameAutoInstance(state: AgentState, name: string) {
 		if (state.status === "running") throw new Error(`Cannot add another ${state.def.name} while ${state.name} is running`);
-		const oldKey = key(state.name); const override = agentModelOverrides.get(oldKey);
+		const oldKey = key(state.name); const modelOverride = agentModelOverrides.get(oldKey); const fastOverride = agentFastOverrides.get(oldKey);
 		agentStates.delete(oldKey); state.name = name; agentStates.set(key(name), state);
 		syncStatus();
-		if (override) { agentModelOverrides.delete(oldKey); agentModelOverrides.set(key(name), override); pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) }); }
+		if (modelOverride !== undefined) {
+			agentModelOverrides.delete(oldKey);
+			agentModelOverrides.set(key(name), modelOverride);
+			pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) });
+		}
+		if (fastOverride !== undefined) {
+			agentFastOverrides.delete(oldKey);
+			agentFastOverrides.set(key(name), fastOverride);
+			pi.appendEntry("agent-team-fast-overrides", { overrides: Object.fromEntries(agentFastOverrides) });
+		}
 	}
 	function nextAutoName(def: AgentDef): { name: string; rename?: { state: AgentState; name: string } } {
 		const base = normalizeName(def.name); const existing = stateFor(base);
@@ -234,8 +266,11 @@ export default function (pi: ExtensionAPI) {
 		if (state === rootAgent) throw new Error("Cannot remove the promoted root; demote it first");
 		if (state.status === "running") throw new Error(`Cannot remove ${displayName(state.name)} while it is running`);
 		if (state.status === "waiting") throw new Error(`${displayName(state.name)} is still returning its result; wait for it to land`);
-		const wasViewed = viewedAgent === state; agentStates.delete(key(state.name)); agentModelOverrides.delete(key(state.name)); discardSession(state);
-		pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) }); persistTeam();
+		const wasViewed = viewedAgent === state; const fastKey = key(state.name);
+		agentStates.delete(fastKey); agentModelOverrides.delete(fastKey); agentFastOverrides.delete(fastKey); discardSession(state);
+		pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) });
+		pi.appendEntry("agent-team-fast-overrides", { overrides: Object.fromEntries(agentFastOverrides) });
+		persistTeam();
 		if (wasViewed) viewedAgent = undefined;
 		applyActiveTools(); updateWidget(); syncStatus(ctx); ctx.ui.notify(`Removed ${displayName(state.name)}`, "info");
 	}
@@ -246,8 +281,12 @@ export default function (pi: ExtensionAPI) {
 			const text = new Text("", 0, 0); return { invalidate() { text.invalidate(); }, render(width: number) {
 				const renderWidth = Math.max(1, width);
 				if (viewedAgent) {
-					text.setText(renderDetail(viewedAgent, Math.max(12, renderWidth), theme, {
-						model: effectiveModel(viewedAgent, widgetCtx), activity: viewedAgent.activity.list(viewedAgent.lastWork), steerable: viewedAgent !== rootAgent,
+					const fast = viewedAgent === rootAgent
+						? hostFastMode(widgetCtx)
+						: viewedAgent.activeRun?.fast ?? effectiveFast(viewedAgent, widgetCtx);
+					const viewed = { ...viewedAgent, model: effectiveModel(viewedAgent, widgetCtx), fast };
+					text.setText(renderDetail(viewed, Math.max(12, renderWidth), theme, {
+						model: formatAgentModelLabel(viewed.model, viewed.fast), activity: viewedAgent.activity.list(viewedAgent.lastWork), steerable: viewedAgent !== rootAgent,
 					}));
 					return text.render(renderWidth);
 				}
@@ -256,7 +295,12 @@ export default function (pi: ExtensionAPI) {
 					return text.render(renderWidth);
 				}
 				// renderGrid returns one string per line; Text wants a single string.
-				text.setText(renderGrid([...agentStates.values()].filter(state => state !== rootAgent), renderWidth, gridCols, theme).join("\n"));
+				const cards = [...agentStates.values()].filter(state => state !== rootAgent).map(state => ({
+					...state,
+					model: effectiveModel(state, widgetCtx),
+					fast: state === rootAgent ? hostFastMode(widgetCtx) : state.activeRun?.fast ?? effectiveFast(state, widgetCtx),
+				}));
+				text.setText(renderGrid(cards, renderWidth, gridCols, theme).join("\n"));
 				return text.render(renderWidth);
 			} };
 		});
@@ -321,8 +365,11 @@ export default function (pi: ExtensionAPI) {
 			.flatMap(path => ["--extension", path]);
 		const args = ["--mode", "rpc", "--no-extensions", ...childExtensions, "--model", effectiveModel(state, ctx), "--tools", state.def.tools, "--thinking", ctx.thinkingLevel ?? "off", "--append-system-prompt", `${state.def.systemPrompt}\n\n# Assigned goal\n${state.goal}`, "--session", file];
 		if (state.sessionFile) args.push("-c");
-		const child = spawn(process.env.PI_BIN || "pi", args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env } }); const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
-		const run: ActiveAgentRun = { child, transport, text: new TextTail(), stderrChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, output: new OutputBuffer(), toolStarts: new Map() }; state.activeRun = run; updateWidget();
+		const fast = effectiveFast(state, ctx);
+		const childEnv = { ...process.env, [OPENAI_FAST_ENV]: fast ? "on" : "off" };
+		const child = spawn(process.env.PI_BIN || "pi", args, { stdio: ["pipe", "pipe", "pipe"], env: childEnv });
+		const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
+		const run: ActiveAgentRun = { child, transport, text: new TextTail(), stderrChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, output: new OutputBuffer(), toolStarts: new Map(), fast }; state.activeRun = run; updateWidget();
 		let buffer = ""; const appendActivity = (kind: ActivityKind, value: unknown) => state.activity.append(kind, value);
 		const persistUsage = (kind: string, message: any, usage: any) => { if (!usage || typeof usage !== "object") return; state.tokens = addTokenCounts(state.tokens, tokenCountsFromUsage(usage)); pi.appendEntry("agent-team-usage", { sourceEventId: `${run.runId}:${kind}:${++run.usageSequence}`, usage, provider: message?.provider, model: message?.model }); pi.events.emit("agent-team:usage", { agent: state.name }); updateWidget(); };
 		const toolSummary = (event: any) => formatToolActivity(event.toolName, event.args ?? event.input ?? event.parameters);
@@ -465,12 +512,12 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.registerTool({ name: "set_agent_model", label: "Set Agent Model", description: "Set a session model for a named dynamic instance.", parameters: Type.Object({ agent: Type.String(), model: Type.String() }), async execute(_id, params, _signal, _update, ctx) { const { agent, model } = params as { agent: string; model: string }; const state = stateFor(agent); if (!state) throw new Error(`Unknown dynamic instance "${agent}"`); if (state === rootAgent) throw new Error("Change the root model with /agents model <name> <model|inherit> when the host is idle"); return { content: [{ type: "text", text: `${state.name}: ${setInstanceModel(state, model, ctx)}` }], details: { agent: state.name } }; } });
 
-	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | clear <subagent-name> | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | view <name> | exit | grid <1-6> | team <team-name|off>";
+	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | clear <subagent-name> | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | fast <name> [on|off] | view <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
 	async function activateTeam(teamName: string | undefined, ctx: any) {
 		for (const state of agentStates.values()) { if (state.activeRun) terminateRun(state.activeRun); clearInterval(state.timer); state.timer = undefined; discardSession(state); }
-		agentStates.clear(); agentModelOverrides.clear(); rootAgent = undefined; viewedAgent = undefined; rootModelRestored = true;
+		agentStates.clear(); agentModelOverrides.clear(); agentFastOverrides.clear(); rootAgent = undefined; viewedAgent = undefined; rootModelRestored = true;
 		// The queue matches deliveries to instances by position; dropped instances must drop with them.
 		pendingDeliveries.length = 0;
 		const team = teamName ? teams[teamName] : undefined;
@@ -478,7 +525,9 @@ export default function (pi: ExtensionAPI) {
 			const def = definitionFor(member);
 			if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
 		}
-		pi.appendEntry("agent-team-model-overrides", { overrides: {} }); persistTeam(); applyActiveTools();
+		pi.appendEntry("agent-team-model-overrides", { overrides: {} });
+		pi.appendEntry("agent-team-fast-overrides", { overrides: {} });
+		persistTeam(); applyActiveTools();
 		if (team?.root) {
 			const def = definitionFor(team.root);
 			if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
@@ -494,10 +543,14 @@ export default function (pi: ExtensionAPI) {
 			const matches = choices.filter(value => value.toLowerCase().startsWith(current.toLowerCase())).map(value => ({ value: `${base}${value}`, label: value }));
 			return matches.length ? matches : null;
 		};
-		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "clear", "remove", "compact", "promote", "list", "model", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
+		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "clear", "remove", "compact", "promote", "list", "model", "fast", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
 		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...predefinedDefs().map(def => def.name), "custom"], "add ").map(item => item.label === "custom" ? { ...item, label: "Custom…" } : item);
 		if (command === "tell" && shouldCompleteTellTarget(parts, trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "waiting").map(state => state.name), "tell ");
 		if (command === "clear" && (parts.length === 1 && trailing || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => canClearAgent(state.status, state === rootAgent)).map(state => state.name), "clear ");
+		if (command === "fast" && (parts.length === 1 || parts.length === 2 && !trailing)) {
+			return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running" && state.status !== "waiting").map(state => state.name), "fast ");
+		}
+		if (command === "fast" && parts.length === 2 && trailing || command === "fast" && parts.length === 3 && !trailing) return values(["on", "off"], `fast ${parts[1]} `);
 		if (command === "remove" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running").map(state => state.name), "remove ");
 		if (command === "compact" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent).map(state => state.name), "compact ");
 		if (command === "promote" && (parts.length === 1 || parts.length === 2 && !trailing)) {
@@ -563,6 +616,19 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (command === "demote") { if (rest.length) return void ctx.ui.notify("Usage: /agents demote", "error"); try { await demote(ctx); } catch (error) { fail(error); } return; }
+			if (command === "fast") {
+				if (rest.length > 2) return void ctx.ui.notify("Usage: /agents fast <name> [on|off]", "error");
+				const [instance, rawMode] = rest; const state = stateFor(instance || "");
+				if (!instance || !state) return void ctx.ui.notify("Usage: /agents fast <name> [on|off]", "error");
+				if (state === rootAgent) return void ctx.ui.notify("Fast mode for promoted root is controlled by /fast in this session.", "warning");
+				if (state.status === "running" || state.status === "waiting") return void ctx.ui.notify(`Wait for ${displayName(state.name)} to finish before changing fast mode.`, "error");
+				const mode = rawMode?.toLowerCase();
+				if (mode && mode !== "on" && mode !== "off") return void ctx.ui.notify("Usage: /agents fast <name> [on|off]", "error");
+				const enabled = mode ? mode === "on" : !effectiveFast(state, ctx);
+				setInstanceFast(state, enabled);
+				ctx.ui.notify(`${displayName(state.name)} fast mode ${enabled ? "enabled" : "disabled"}`, "info");
+				return;
+			}
 			if (command === "model") {
 				const [instance, model] = rest; const state = stateFor(instance || "");
 				if (!instance) return listInstances(ctx);
@@ -618,6 +684,7 @@ export default function (pi: ExtensionAPI) {
 		const catalog = delegationCatalog([...agentStates.values()]);
 		return { systemPrompt: `${event.systemPrompt}\n\nYou are a dispatcher. Delegate through dispatch_agent only. Dynamic instances:\n${catalog}\n${delegationGuidance}\nDo not use codebase tools directly. Synthesize child results into one answer.` };
 	});
+	pi.events.on("openai-fast:changed", () => updateWidget());
 	pi.on("model_select", (_event, ctx) => { for (const state of agentStates.values()) if (state.status !== "running") state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); updateWidget(); });
 	pi.on("agent_start", (_event, ctx) => {
 		hostBusy = true;
@@ -666,7 +733,14 @@ export default function (pi: ExtensionAPI) {
 			agentAutocompleteInstalled = true;
 		}
 		widgetCtx = ctx; parentSessionId = ctx.sessionManager.getSessionId(); viewedAgent = undefined; hostTools = undefined; rootModelRestored = true; hostBusy = !ctx.isIdle(); pendingDeliveries.length = 0; loadAgents(ctx.cwd);
-		agentModelOverrides.clear(); const overrides = (ctx.sessionManager.getEntries() as any[]).filter(entry => entry.type === "custom" && entry.customType === "agent-team-model-overrides").pop()?.data as { overrides?: Record<string, string> } | undefined; for (const [name, model] of Object.entries(overrides?.overrides ?? {})) agentModelOverrides.set(name, model);
+		agentModelOverrides.clear();
+		agentFastOverrides.clear();
+		const modelOverrides = (ctx.sessionManager.getEntries() as any[]).filter(entry => entry.type === "custom" && entry.customType === "agent-team-model-overrides").pop()?.data as { overrides?: Record<string, string> } | undefined;
+		const fastOverrides = (ctx.sessionManager.getEntries() as any[]).filter(entry => entry.type === "custom" && entry.customType === "agent-team-fast-overrides").pop()?.data as SavedAgentFastOverrides | undefined;
+		for (const [name, model] of Object.entries(modelOverrides?.overrides ?? {})) agentModelOverrides.set(name, model);
+		for (const [name, enabled] of Object.entries(fastOverrides?.overrides ?? {})) {
+			if (typeof enabled === "boolean") agentFastOverrides.set(name, enabled);
+		}
 		restoreTeam(ctx);
 		for (const state of agentStates.values()) state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx);
 		if (rootAgent) {
