@@ -433,15 +433,7 @@ export function renderMinimalistFrame({
 			return renderStaticBorder(text);
 		}
 	};
-	const renderStaticThinking = (text: string) =>
-		renderStyleForSourceOrFallback(
-			uiTheme,
-			source,
-			thinkingStyle(config, text),
-			MINIMALIST_THINKING_FALLBACK,
-			text,
-		);
-	const renderThinking = adaptive ? renderBorder : renderStaticThinking;
+	const renderThinking = (text: string) => safeThemeFg(uiTheme, "muted", text);
 	const separator = safeThemeFg(uiTheme, "muted", " · ");
 	const viewportLabel = (direction: "above" | "below", count: string | undefined) => {
 		if (!count || !/^[1-9]\d*$/.test(count)) return "";
