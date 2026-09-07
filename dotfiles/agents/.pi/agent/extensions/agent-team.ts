@@ -727,14 +727,18 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("agent-model", {
 		description: "Show or set an agent model for this session",
 		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
+			const teamAgents = normalMode || directAgent
+				? []
+				: Array.from(agentStates.values()).map(state => state.def);
 			const space = prefix.indexOf(" ");
 			if (space < 0) {
-				const items = allAgentDefs
+				const items = teamAgents
 					.filter(def => def.name.startsWith(prefix))
 					.map(def => ({ value: def.name, label: def.name }));
 				return items.length > 0 ? items : null;
 			}
 			const agent = prefix.slice(0, space);
+			if (!teamAgents.some(def => def.name === agent)) return null;
 			const modelPrefix = prefix.slice(space + 1);
 			const models = ["inherit", ...new Set(allAgentDefs.map(def => def.model).filter(Boolean) as string[])];
 			const items = models
