@@ -420,6 +420,7 @@ export default function (pi: ExtensionAPI) {
 			"-p",
 			"--no-extensions",
 			"--extension", join(homedir(), ".pi", "agent", "extensions", "openai-codex-fast.ts"),
+			"--extension", join(homedir(), ".pi", "agent", "extensions", "ponytail.ts"),
 			"--model", model,
 			"--tools", state.def.tools,
 			"--thinking", "off",
