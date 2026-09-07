@@ -683,18 +683,22 @@ export default function (pi: ExtensionAPI) {
 					const choice = await ctx.ui.select("Switch team session?", ["start fresh", "fork current session"]);
 					if (!choice) return;
 					const snapshot = teamSnapshot(selected);
-					if (choice === "start fresh") {
-						await ctx.newSession({ parentSession: ctx.sessionManager.getSessionFile(), setup: async sessionManager => {
-							sessionManager.appendCustomEntry("agent-team-instances", snapshot);
-							sessionManager.appendCustomEntry("agent-team-model-overrides", { overrides: {} });
-							sessionManager.appendCustomEntry("agent-team-fast-overrides", { overrides: {} });
-						} });
+					const seedTargetSession = async (sessionManager: any) => {
+						sessionManager.appendCustomEntry("agent-team-instances", snapshot);
+						sessionManager.appendCustomEntry("agent-team-model-overrides", { overrides: {} });
+						sessionManager.appendCustomEntry("agent-team-fast-overrides", { overrides: {} });
+					};
+					const newTargetSession = () => ctx.newSession({ parentSession: ctx.sessionManager.getSessionFile(), setup: seedTargetSession, withSession: async replacementCtx => {
+						await replacementCtx.reload();
+						return;
+					} });
+					const leafId = ctx.sessionManager.getLeafId();
+					if (choice === "start fresh" || !leafId) {
+						await newTargetSession();
 						return;
 					}
-					await ctx.fork(ctx.sessionManager.getLeafId()!, { position: "at", withSession: async replacementCtx => {
-						replacementCtx.sessionManager.appendCustomEntry("agent-team-instances", snapshot);
-						replacementCtx.sessionManager.appendCustomEntry("agent-team-model-overrides", { overrides: {} });
-						replacementCtx.sessionManager.appendCustomEntry("agent-team-fast-overrides", { overrides: {} });
+					await ctx.fork(leafId, { position: "at", withSession: async replacementCtx => {
+						await seedTargetSession(replacementCtx.sessionManager);
 						await replacementCtx.reload();
 						return;
 					} });
