@@ -96,7 +96,7 @@ export default function (pi: ExtensionAPI) {
 	let allAgentDefs: AgentDef[] = []; let teams: Record<string, string[]> = {};
 	let widgetCtx: any; let sessionDir = ""; let parentSessionId = "";
 	let viewedAgent: AgentState | undefined; let rootAgent: AgentState | undefined;
-	let gridCols = 2; let rootStartTime = 0;
+	let agentAutocompleteInstalled = false; let gridCols = 2; let rootStartTime = 0;
 
 	const stateFor = (name: string) => agentStates.get(key(name));
 	const parentModel = (ctx: any) => ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "openrouter/google/gemini-3-flash-preview";
@@ -210,7 +210,15 @@ export default function (pi: ExtensionAPI) {
 		const defaultGoal = def.description || `Work as ${displayName(def.name)}`; const choice = await ctx.ui.select("Set instance goal", [`Default — ${defaultGoal}`, "Custom…"]); if (!choice) return;
 		const goal = choice === "Custom…" ? (await ctx.ui.input("Custom goal", "Goal for this instance"))?.trim() : defaultGoal; if (!goal) return;
 		if (autoName?.rename) renameAutoInstance(autoName.rename.state, autoName.rename.name);
-		const state = makeState(def, name, goal, !explicit); agentStates.set(key(name), state); if (!rootAgent) pi.setActiveTools(TEAM_TOOLS); persistTeam(); updateWidget(); ctx.ui.notify(`Added ${displayName(name)} (${def.name})`, "info");
+		const state = makeState(def, name, goal, !explicit, randomUUID()); agentStates.set(key(name), state); if (!rootAgent) pi.setActiveTools(TEAM_TOOLS); persistTeam(); updateWidget(); ctx.ui.notify(`Added ${displayName(name)} (${def.name})`, "info");
+	}
+	function removeAgent(state: AgentState, ctx: any) {
+		if (state === rootAgent) throw new Error("Cannot remove the promoted root");
+		if (state.status === "running") throw new Error(`Cannot remove ${displayName(state.name)} while it is running`);
+		const wasViewed = viewedAgent === state; agentStates.delete(key(state.name)); agentModelOverrides.delete(key(state.name));
+		pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) }); persistTeam();
+		if (wasViewed) { viewedAgent = undefined; ctx.ui.setStatus("agent-team", undefined); }
+		updateWidget(); ctx.ui.notify(`Removed ${displayName(state.name)}`, "info");
 	}
 
 	function renderCard(state: AgentState, width: number, theme: any): string[] {
@@ -277,6 +285,25 @@ export default function (pi: ExtensionAPI) {
 		if (state.status === "running") { const run = state.activeRun; if (!run || run.finished || run.stopping) throw new Error(`${displayName(state.name)} cannot be steered`); await run.transport.request({ type: "prompt", message: task, streamingBehavior: "steer" }); return { status: "steered" as const }; }
 		const run = startAgent(state, task, ctx); try { await run.transport.request({ type: "prompt", message: task }); run.accepted = true; return { status: "running" as const }; } catch (error) { const failure = new Error(`Unable to start ${displayName(state.name)}: ${error instanceof Error ? error.message : String(error)}`); finishRun(state, run, failure); throw failure; }
 	}
+	async function compactAgent(name: string, ctx: any) {
+		const state = stateFor(name);
+		if (!state) throw new Error(`Unknown dynamic instance "${name}"`);
+		if (state === rootAgent) throw new Error("Use /compact for the promoted root");
+		if (state.status === "running") throw new Error(`${displayName(state.name)} is running; wait for it to finish before compacting`);
+		const run = startAgent(state, "Compacting child session", ctx);
+		try {
+			await run.transport.request({ type: "compact" });
+			finishRun(state, run);
+			state.history = latestChildTranscript(run.sessionFile);
+			state.contextTokens = latestAssistantContextTokens(run.sessionFile) ?? 0;
+			updateWidget();
+			ctx.ui.notify(`${displayName(state.name)} compacted`, "success");
+		} catch (error) {
+			const failure = new Error(`Unable to compact ${displayName(state.name)}: ${error instanceof Error ? error.message : String(error)}`);
+			finishRun(state, run, failure);
+			throw failure;
+		}
+	}
 
 	pi.registerTool({ name: "dispatch_agent", label: "Dispatch Agent", description: "Dispatch or steer a named dynamic team instance. Results return privately for one host response.", parameters: Type.Object({ agent: Type.String({ description: "Unique dynamic instance name" }), task: Type.String({ description: "Focused task" }) }),
 		async execute(_id, params, _signal, _update, ctx) { const { agent, task } = params as { agent: string; task: string }; const submitted = await submitAgent(agent, task, ctx); return { content: [{ type: "text", text: `${displayName(agent)} ${submitted.status === "steered" ? "steering accepted" : "is working in the background"}.` }], details: { agent, status: submitted.status } }; },
@@ -285,7 +312,7 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.registerTool({ name: "set_agent_model", label: "Set Agent Model", description: "Set a session model for a named dynamic instance.", parameters: Type.Object({ agent: Type.String(), model: Type.String() }), async execute(_id, params, _signal, _update, ctx) { const { agent, model } = params as { agent: string; model: string }; const state = stateFor(agent); if (!state) throw new Error(`Unknown dynamic instance "${agent}"`); if (state === rootAgent) throw new Error("Change the root model with /agents model <name> <model|inherit> when the host is idle"); return { content: [{ type: "text", text: `${state.name}: ${setInstanceModel(state, model, ctx)}` }], details: { agent: state.name } }; } });
 
-	const usage = "Usage: /agents add <type> [name] | promote <name> | list | model <name> [model|inherit] | detail <name> | exit | grid <1-6> | team <team-name|off>";
+	const usage = "Usage: /agents add <type> [name] | remove <name> | compact <name> | promote <name> | list | model <name> [model|inherit] | detail <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
 	function activateTeam(teamName: string | undefined, ctx: any) {
@@ -298,31 +325,36 @@ export default function (pi: ExtensionAPI) {
 		pi.appendEntry("agent-team-model-overrides", { overrides: {} }); persistTeam(); pi.setActiveTools(TEAM_TOOLS);
 		ctx.ui.setStatus("agent-team", undefined); updateWidget();
 	}
+	const getAgentArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
+		const trailing = /\s$/.test(prefix); const parts = prefix.trim() ? prefix.trim().split(/\s+/) : [];
+		const command = parts[0]; const current = trailing ? "" : parts.at(-1) ?? "";
+		const values = (choices: string[], base = "") => {
+			const matches = choices.filter(value => value.toLowerCase().startsWith(current.toLowerCase())).map(value => ({ value: `${base}${value}`, label: value }));
+			return matches.length ? matches : null;
+		};
+		if (!command || parts.length === 1 && !trailing) return values(["add", "remove", "compact", "promote", "list", "model", "detail", "grid", "team", "help", ...(viewedAgent ? ["exit"] : [])]);
+		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(allAgentDefs.map(def => def.name), "add ");
+		if (command === "remove" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running").map(state => state.name), "remove ");
+		if (command === "compact" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent).map(state => state.name), "compact ");
+		if (command === "promote" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running").map(state => state.name), "promote ");
+		if (command === "detail" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].map(state => state.name), "detail ");
+		if (command === "model" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].map(state => state.name), "model ");
+		if (command === "model" && parts.length === 2 && trailing || command === "model" && parts.length === 3 && !trailing) return values(["inherit", ...availableModels()], `model ${parts[1]} `);
+		if (command === "grid" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(["1", "2", "3", "4", "5", "6"], "grid ");
+		if (command === "team" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(["off", ...Object.keys(teams)], "team ");
+		return null;
+	};
 	pi.registerCommand("agents", {
 		description: "Manage dynamic team instances",
-		getArgumentCompletions(prefix): AutocompleteItem[] | null {
-			const trailing = /\s$/.test(prefix); const parts = prefix.trim() ? prefix.trim().split(/\s+/) : [];
-			const command = parts[0]; const current = trailing ? "" : parts.at(-1) ?? "";
-			const values = (choices: string[], base = "") => {
-				const matches = choices.filter(value => value.toLowerCase().startsWith(current.toLowerCase())).map(value => ({ value: `${base}${value}`, label: value }));
-				return matches.length ? matches : null;
-			};
-			if (!command || parts.length === 1 && !trailing) return values(["add", "promote", "list", "model", "detail", "grid", "team", "help", ...(viewedAgent ? ["exit"] : [])]);
-			if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(allAgentDefs.map(def => def.name), "add ");
-			if (command === "promote" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running").map(state => state.name), "promote ");
-			if (command === "detail" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].map(state => state.name), "detail ");
-			if (command === "model" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].map(state => state.name), "model ");
-			if (command === "model" && parts.length === 2 && trailing || command === "model" && parts.length === 3 && !trailing) return values(["inherit", ...availableModels()], `model ${parts[1]} `);
-			if (command === "grid" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(["1", "2", "3", "4", "5", "6"], "grid ");
-			if (command === "team" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(["off", ...Object.keys(teams)], "team ");
-			return null;
-		},
+		getArgumentCompletions: getAgentArgumentCompletions,
 		async handler(args, ctx) {
 			widgetCtx = ctx; const [command, ...rest] = args.trim().split(/\s+/); const name = rest.join(" ");
 			if (!command || command === "help") return void ctx.ui.notify(usage, "info");
 			if (command === "list" && !rest.length) return listInstances(ctx);
 			if (command === "grid") { const value = rest[0] || ""; if (!/^[1-6]$/.test(value) || rest.length !== 1) return void ctx.ui.notify("Usage: /agents grid <1-6>", "error"); gridCols = Number(value); updateWidget(); return; }
 			if (command === "add") { try { await addAgent(rest, ctx, "/agents add"); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return; }
+			if (command === "remove") { const state = stateFor(name); if (!state) return void ctx.ui.notify(`Unknown instance "${name}". Usage: /agents remove <name>`, "error"); try { removeAgent(state, ctx); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return; }
+			if (command === "compact") { if (!name) return void ctx.ui.notify("Usage: /agents compact <name>", "error"); try { await compactAgent(name, ctx); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return; }
 			if (command === "promote") { const state = stateFor(name); if (!state || state === rootAgent) return void ctx.ui.notify("Usage: /agents promote <name>", "error"); try { await promote(state, ctx); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return; }
 			if (command === "model") {
 				const [instance, model] = rest; const state = stateFor(instance || "");
@@ -360,6 +392,19 @@ export default function (pi: ExtensionAPI) {
 	pi.on("agent_settled", (_event, ctx) => { if (!rootAgent) return; clearInterval(rootAgent.timer); rootAgent.elapsed = rootStartTime ? Date.now() - rootStartTime : rootAgent.elapsed; rootAgent.status = "done"; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); });
 	pi.on("session_shutdown", () => { for (const state of agentStates.values()) { clearInterval(state.timer); state.timer = undefined; if (state.activeRun) terminateRun(state.activeRun); } });
 	pi.on("session_start", async (_event, ctx) => {
+		if (!agentAutocompleteInstalled) {
+			ctx.ui.addAutocompleteProvider(current => ({
+				async getSuggestions(lines, cursorLine, cursorCol, options) {
+					const prefix = (lines[cursorLine] ?? "").slice(0, cursorCol).match(/^\/agents[ \t]+([\s\S]*)$/)?.[1];
+					if (!options.force || prefix === undefined) return current.getSuggestions(lines, cursorLine, cursorCol, options);
+					const items = getAgentArgumentCompletions(prefix);
+					return items ? { items, prefix } : current.getSuggestions(lines, cursorLine, cursorCol, options);
+				},
+				applyCompletion(lines, cursorLine, cursorCol, item, prefix) { return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix); },
+				shouldTriggerFileCompletion(lines, cursorLine, cursorCol) { return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true; },
+			}));
+			agentAutocompleteInstalled = true;
+		}
 		widgetCtx = ctx; parentSessionId = ctx.sessionManager.getSessionId(); viewedAgent = undefined; loadAgents(ctx.cwd);
 		agentModelOverrides.clear(); const overrides = ctx.sessionManager.getEntries().filter((entry: any) => entry.type === "custom" && entry.customType === "agent-team-model-overrides").pop()?.data as { overrides?: Record<string, string> } | undefined; for (const [name, model] of Object.entries(overrides?.overrides ?? {})) agentModelOverrides.set(name, model);
 		restoreTeam(ctx); for (const state of agentStates.values()) state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); if (rootAgent) { const modelName = effectiveModel(rootAgent, ctx); const slash = modelName.indexOf("/"); const model = slash > 0 ? ctx.modelRegistry.find(modelName.slice(0, slash), modelName.slice(slash + 1)) : undefined; const restored = parentModel(ctx) === modelName || !!model && await pi.setModel(model); if (!restored) ctx.ui.notify(`ROOT ${rootAgent.name}: unable to restore model ${modelName}`, "warning"); pi.setActiveTools(rootTools(rootAgent)); ctx.ui.setStatus("agent-team", `Root: ${displayName(rootAgent.name)}${restored ? "" : " (model restore failed)"}`); } else pi.setActiveTools(TEAM_TOOLS); updateWidget();
