@@ -27,6 +27,11 @@ import { randomUUID } from "crypto";
 import { readdirSync, readFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join, resolve } from "path";
+import {
+	contextTokensFromUsage,
+	hasRunningAgent,
+	latestAssistantContextTokens,
+} from "./agent-team-helpers";
 
 // ── Types ────────────────────────────────────────
 
@@ -51,7 +56,7 @@ interface AgentState {
 	toolCount: number;
 	elapsed: number;
 	lastWork: string;
-	contextPct: number;
+	contextTokens?: number;
 	sessionFile: string | null;
 	runCount: number;
 	timer?: ReturnType<typeof setInterval>;
@@ -248,7 +253,7 @@ export default function (pi: ExtensionAPI) {
 			toolCount: 0,
 			elapsed: 0,
 			lastWork: "",
-			contextPct: 0,
+			contextTokens: latestAssistantContextTokens(file),
 			sessionFile: existsSync(file) ? file : null,
 			runCount: 0,
 		};
@@ -294,9 +299,9 @@ export default function (pi: ExtensionAPI) {
 		const statusVisible = statusStr.length + timeStr.length;
 
 		const formatTokens = (tokens: number) => tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : `${Math.round(tokens)}`;
-		const ctxStr = contextWindow > 0 && Number.isFinite(state.contextPct)
-			? `${formatTokens(state.contextPct * contextWindow / 100)}/${formatTokens(contextWindow)}`
-			: "?/?";
+		const ctxStr = `${state.contextTokens === undefined ? "?" : formatTokens(state.contextTokens)}/${
+			contextWindow > 0 ? formatTokens(contextWindow) : "?"
+		}`;
 		const ctxLine = theme.fg("dim", ctxStr);
 		const ctxVisible = ctxStr.length;
 
@@ -467,16 +472,20 @@ export default function (pi: ExtensionAPI) {
 							state.toolCount++;
 							updateWidget();
 						} else if (event.type === "message_end") {
-							const msg = event.message;
-							if (msg?.usage && contextWindow > 0) {
-								state.contextPct = ((msg.usage.input || 0) / contextWindow) * 100;
+							const tokens = contextTokensFromUsage(event.message?.usage);
+							if (tokens !== undefined) {
+								state.contextTokens = tokens;
 								updateWidget();
 							}
 						} else if (event.type === "agent_end") {
-							const msgs = event.messages || [];
-							const last = [...msgs].reverse().find((m: any) => m.role === "assistant");
-							if (last?.usage && contextWindow > 0) {
-								state.contextPct = ((last.usage.input || 0) / contextWindow) * 100;
+							const last = [...(event.messages || [])]
+								.reverse()
+								.find((message: any) =>
+									message.role === "assistant" && contextTokensFromUsage(message.usage) !== undefined
+								);
+							const tokens = contextTokensFromUsage(last?.usage);
+							if (tokens !== undefined) {
+								state.contextTokens = tokens;
 								updateWidget();
 							}
 						}
@@ -671,6 +680,10 @@ export default function (pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			const requested = args.trim();
+			if (hasRunningAgent(agentStates.values())) {
+				ctx.ui.notify("Wait for running team agents before switching sessions", "warning");
+				return;
+			}
 			if (directAgent && (!requested || requested === directAgent.name)) {
 				ctx.ui.notify(`Chatting with ${displayName(directAgent.name)}. Use /agent exit to return.`, "info");
 				return;
@@ -854,6 +867,11 @@ ${agentCatalog}`,
 	});
 
 	// ── Session Start ────────────────────────────
+
+	pi.on("model_select", (event) => {
+		contextWindow = event.model.contextWindow || 0;
+		updateWidget();
+	});
 
 	pi.on("session_start", async (_event, _ctx) => {
 		// Clear widgets from previous session
