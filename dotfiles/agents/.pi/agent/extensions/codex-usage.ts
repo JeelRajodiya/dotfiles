@@ -31,7 +31,7 @@ export default function codexUsage(pi: ExtensionAPI) {
 					"codex-usage",
 					ctx.ui.theme.fg(
 						"accent",
-						`${Math.max(0, 100 - used)}% remaining (resets in ${days}d ${hours}h)`,
+						`${Math.max(0, 100 - used)}% resets in ${days}d ${hours}h`,
 					),
 				);
 			} catch {
