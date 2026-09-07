@@ -1,4 +1,13 @@
 {
+  "colors": {
+    "cost": "syntaxString",
+    "contextNormal": "syntaxNumber",
+    "cwd": "syntaxType",
+    "editorGitBranch": "syntaxKeyword",
+    "editorModel": "syntaxFunction",
+    "editorThinkingMedium": "thinkingText",
+    "gitStatus": "error"
+  },
   "components": {
     "editor": {
       "style": "minimalist",
