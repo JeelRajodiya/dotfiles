@@ -151,8 +151,11 @@ function scanAgentDirs(cwd: string): AgentDef[] {
 
 // ── Extension ────────────────────────────────────
 
+const TEAM_TOOLS = ["dispatch_agent", "set_agent_model"];
+
 export default function (pi: ExtensionAPI) {
 	const agentStates: Map<string, AgentState> = new Map();
+	const agentModelOverrides = new Map<string, string>();
 	let allAgentDefs: AgentDef[] = [];
 	let teams: Record<string, string[]> = {};
 	let activeTeamName = "";
@@ -164,6 +167,42 @@ export default function (pi: ExtensionAPI) {
 	let normalMode = false;
 	let defaultTools: string[] = [];
 	const registeredAgentCommands = new Set<string>();
+
+	function parentModel(ctx: any): string {
+		return ctx.model
+			? `${ctx.model.provider}/${ctx.model.id}`
+			: "openrouter/google/gemini-3-flash-preview";
+	}
+
+	function effectiveAgentModel(def: AgentDef, ctx: any): string {
+		return agentModelOverrides.get(def.name.toLowerCase()) ?? def.model ?? parentModel(ctx);
+	}
+
+	function modelSetting(def: AgentDef, ctx: any): string {
+		const override = agentModelOverrides.get(def.name.toLowerCase());
+		if (override) return `${override} (session override)`;
+		if (def.model) return `${def.model} (default)`;
+		return `${parentModel(ctx)} (inherited)`;
+	}
+
+	function validModel(model: string, ctx: any): boolean {
+		const slash = model.indexOf("/");
+		return slash > 0 && Boolean(ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1)));
+	}
+
+	function setAgentModel(agentName: string, model: string, ctx: any): string {
+		const def = allAgentDefs.find(agent => agent.name.toLowerCase() === agentName.toLowerCase());
+		if (!def) throw new Error(`Unknown agent "${agentName}"`);
+		if (model === "inherit") {
+			agentModelOverrides.delete(def.name.toLowerCase());
+		} else if (validModel(model, ctx)) {
+			agentModelOverrides.set(def.name.toLowerCase(), model);
+		} else {
+			throw new Error(`Unknown model "${model}"`);
+		}
+		pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) });
+		return modelSetting(def, ctx);
+	}
 
 	function sessionPath(def: AgentDef): string {
 		const key = def.name.toLowerCase().replace(/\s+/g, "-");
@@ -581,9 +620,7 @@ export default function (pi: ExtensionAPI) {
 		if (!state) return { ok: false as const, message: `Agent "${agentName}" not found` };
 
 		const queued = state.status === "running";
-		const model = state.def.model ?? (ctx.model
-			? `${ctx.model.provider}/${ctx.model.id}`
-			: "openrouter/google/gemini-3-flash-preview");
+		const model = effectiveAgentModel(state.def, ctx);
 		state.queue.push({ task, model });
 		const position = state.queue.length;
 		if (!queued) runNext(state);
@@ -667,7 +704,65 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerTool({
+		name: "set_agent_model",
+		label: "Set Agent Model",
+		description: "Set a session-specific model for an agent, or use inherit to restore its configured default.",
+		parameters: Type.Object({
+			agent: Type.String({ description: "Agent name (case-insensitive)" }),
+			model: Type.String({ description: "Provider/model identifier, or inherit" }),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const { agent, model } = params as { agent: string; model: string };
+			const setting = setAgentModel(agent, model, ctx);
+			return {
+				content: [{ type: "text", text: `${displayName(agent)} model: ${setting}` }],
+				details: { agent, model: setting },
+			};
+		},
+	});
+
 	// ── Commands ─────────────────────────────────
+
+	pi.registerCommand("agent-model", {
+		description: "Show or set an agent model for this session",
+		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
+			const space = prefix.indexOf(" ");
+			if (space < 0) {
+				const items = allAgentDefs
+					.filter(def => def.name.startsWith(prefix))
+					.map(def => ({ value: def.name, label: def.name }));
+				return items.length > 0 ? items : null;
+			}
+			const agent = prefix.slice(0, space);
+			const modelPrefix = prefix.slice(space + 1);
+			const models = ["inherit", ...new Set(allAgentDefs.map(def => def.model).filter(Boolean) as string[])];
+			const items = models
+				.filter(model => model.startsWith(modelPrefix))
+				.map(model => ({ value: `${agent} ${model}`, label: model }));
+			return items.length > 0 ? items : null;
+		},
+		handler: async (args, ctx) => {
+			if (directAgent) {
+				ctx.ui.notify("Use /agent exit first; direct chats use normal model controls", "warning");
+				return;
+			}
+			const [agent, model, ...extra] = args.trim().split(/\s+/);
+			if (!agent) {
+				ctx.ui.notify(allAgentDefs.map(def => `${displayName(def.name)}: ${modelSetting(def, ctx)}`).join("\n"), "info");
+				return;
+			}
+			if (!model || extra.length > 0) {
+				ctx.ui.notify("Usage: /agent-model <agent> <provider/model|inherit>", "error");
+				return;
+			}
+			try {
+				ctx.ui.notify(`${displayName(agent)} model: ${setAgentModel(agent, model, ctx)}`, "info");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
 
 	pi.registerCommand("agent", {
 		description: "Open an agent's chat session, or return with /agent exit",
@@ -776,7 +871,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			normalMode = false;
 			activateTeam(name);
-			pi.setActiveTools(["dispatch_agent"]);
+			pi.setActiveTools(TEAM_TOOLS);
 			pi.appendEntry("agent-team-mode", { team: name });
 			updateWidget();
 			ctx.ui.setStatus("agent-team", undefined);
@@ -833,7 +928,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Build dynamic agent catalog from active team only
 		const agentCatalog = Array.from(agentStates.values())
-			.map(s => `### ${displayName(s.def.name)}\n**Dispatch as:** \`${s.def.name}\`\n${s.def.description}\n**Tools:** ${s.def.tools}`)
+			.map(s => `### ${displayName(s.def.name)}\n**Dispatch as:** \`${s.def.name}\`\n${s.def.description}\n**Model:** ${modelSetting(s.def, _ctx)}\n**Tools:** ${s.def.tools}`)
 			.join("\n\n");
 
 		const teamMembers = Array.from(agentStates.values()).map(s => displayName(s.def.name)).join(", ");
@@ -851,6 +946,7 @@ You can ONLY dispatch to agents listed below. Do not attempt to dispatch to agen
 - Analyze the user's request and break it into clear sub-tasks
 - Choose the right agent(s) for each sub-task
 - Dispatch tasks using the dispatch_agent tool
+- Use set_agent_model when the user asks to change an agent's model
 - Review results and dispatch follow-up agents if needed
 - If a task fails, try a different agent or adjust the task description
 - Summarize the outcome for the user
@@ -858,6 +954,7 @@ You can ONLY dispatch to agents listed below. Do not attempt to dispatch to agen
 ## Rules
 - NEVER try to read, write, or execute code directly — you have no such tools
 - ALWAYS use dispatch_agent to get work done
+- Model overrides apply to this parent session; use set_agent_model with inherit to clear one
 - You can chain agents: use scout to explore, then builder to implement
 - You can dispatch the same agent multiple times with different tasks
 - Keep tasks focused — one clear objective per dispatch
@@ -882,8 +979,9 @@ ${agentCatalog}`,
 		}
 		widgetCtx = _ctx;
 		contextWindow = _ctx.model?.contextWindow || 0;
-		defaultTools = pi.getActiveTools().filter(tool => tool !== "dispatch_agent");
+		defaultTools = pi.getActiveTools().filter(tool => !TEAM_TOOLS.includes(tool));
 		loadAgents(_ctx.cwd);
+		agentModelOverrides.clear();
 
 		const currentSession = _ctx.sessionManager.getSessionFile();
 		directAgent = currentSession
@@ -902,6 +1000,15 @@ ${agentCatalog}`,
 				"info",
 			);
 		} else {
+			const savedOverrides = _ctx.sessionManager.getEntries()
+				.filter(entry => entry.type === "custom" && entry.customType === "agent-team-model-overrides")
+				.pop()?.data as { overrides?: Record<string, string> } | undefined;
+			for (const [agent, model] of Object.entries(savedOverrides?.overrides ?? {})) {
+				if (allAgentDefs.some(def => def.name.toLowerCase() === agent) && validModel(model, _ctx)) {
+					agentModelOverrides.set(agent, model);
+				}
+			}
+
 			const savedMode = _ctx.sessionManager.getEntries()
 				.filter(entry => entry.type === "custom" && entry.customType === "agent-team-mode")
 				.pop()?.data as { team?: string | null } | undefined;
@@ -918,13 +1025,14 @@ ${agentCatalog}`,
 			} else {
 				activateTeam(team);
 
-				pi.setActiveTools(["dispatch_agent"]);
+				pi.setActiveTools(TEAM_TOOLS);
 				_ctx.ui.setStatus("agent-team", undefined);
 				const members = Array.from(agentStates.values()).map(s => displayName(s.def.name)).join(", ");
 				_ctx.ui.notify(
 					`Team: ${activeTeamName} (${members})\n` +
 					`Team sets loaded from: .pi/agents/teams.yaml\n\n` +
 					`/agent <name>        Open an agent chat\n` +
+					`/agent-model         Show or change agent models\n` +
 					`/agents-team         Select a team or normal mode\n` +
 					`/agents-list         List active agents and status\n` +
 					`/agents-grid <1-6>   Set grid column count`,
