@@ -7,9 +7,9 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
-	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, canClearAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
-	formatAgentModelLabel, formatToolActivity, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity,
-	OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent,
+	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, canClearAgent, canInterruptAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
+	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, latestAssistantContextTokens, latestChildActivity,
+	OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent, shouldIgnoreAgentRunEvent,
 	restoreWaitingAgents, rootTools, sessionTokenCounts, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
 	terminateChild, type AgentCompletionStatus, type TokenCounts,
 } from "./agent-team-helpers.ts";
@@ -32,7 +32,7 @@ type SavedTeam = { instances: SavedInstance[]; root?: string };
 type SavedAgentFastOverrides = { overrides?: Record<string, boolean> };
 type LegacyTeamMode = { team?: string | null };
 
-const TEAM_TOOLS = ["dispatch_agent", "set_agent_model"];
+const TEAM_TOOLS = ["dispatch_agent", "interrupt_agent", "set_agent_model"];
 const MAX_KEPT_SESSIONS = 20;
 const displayName = (name: string) => name.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 const key = (name: string) => name.toLowerCase();
@@ -323,6 +323,17 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function terminateRun(run: ActiveAgentRun) { run.stopping = true; run.transport.fail(new Error("Agent process stopped")); terminateChild(run.child); }
+	function interruptAgent(name: string) {
+		const state = stateFor(name);
+		if (!state) throw new Error(`Unknown dynamic instance "${name}"`);
+		if (state === rootAgent) throw new Error("The root agent cannot be interrupted");
+		if (!canInterruptAgent(state.status, false)) throw new Error(`${displayName(state.name)} is ${state.status}; only running agents can be interrupted`);
+		const run = state.activeRun;
+		if (!run || !interruptAgentRun(state, run, () => clearInterval(state.timer))) throw new Error(`${displayName(state.name)} is not interruptible`);
+		updateWidget();
+		syncStatus();
+		return state;
+	}
 	function finishRun(state: AgentState, run: ActiveAgentRun, error?: Error) {
 		if (run.finished || state.activeRun !== run) return;
 		run.finished = true;
@@ -417,6 +428,7 @@ export default function (pi: ExtensionAPI) {
 
 		const handle = (event: any) => {
 			if (transport.handle(event)) return;
+			if (shouldIgnoreAgentRunEvent(run.finished, run.stopping)) return;
 			switch (event.type) {
 				case "message_update": {
 					const type = event.assistantMessageEvent?.type;
@@ -510,9 +522,10 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme) { const task = (args as any).task || ""; return new Text(theme.fg("toolTitle", theme.bold("dispatch_agent ")) + theme.fg("accent", (args as any).agent || "?") + theme.fg("dim", ` — ${task.slice(0, 60)}`), 0, 0); },
 		renderResult(result, _options, theme) { const details = result.details as any; return new Text(theme.fg("accent", `● ${details?.agent || "agent"}`) + theme.fg("dim", details?.status === "steered" ? " steering accepted" : " working..."), 0, 0); },
 	});
+	pi.registerTool({ name: "interrupt_agent", label: "Interrupt Agent", description: "Immediately terminate a running child agent without sending it a prompt.", parameters: Type.Object({ agent: Type.String({ description: "Running child instance name" }) }), async execute(_id, params) { const state = interruptAgent((params as { agent: string }).agent); return { content: [{ type: "text", text: `${displayName(state.name)} interrupted.` }], details: { agent: state.name, status: state.status } }; } });
 	pi.registerTool({ name: "set_agent_model", label: "Set Agent Model", description: "Set a session model for a named dynamic instance.", parameters: Type.Object({ agent: Type.String(), model: Type.String() }), async execute(_id, params, _signal, _update, ctx) { const { agent, model } = params as { agent: string; model: string }; const state = stateFor(agent); if (!state) throw new Error(`Unknown dynamic instance "${agent}"`); if (state === rootAgent) throw new Error("Change the root model with /agents model <name> <model|inherit> when the host is idle"); return { content: [{ type: "text", text: `${state.name}: ${setInstanceModel(state, model, ctx)}` }], details: { agent: state.name } }; } });
 
-	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | clear <subagent-name> | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | fast <name> [on|off] | view <name> | exit | grid <1-6> | team <team-name|off>";
+	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | interrupt <agent> | clear <subagent-name> | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | fast <name> [on|off] | view <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
 	async function activateTeam(teamName: string | undefined, ctx: any) {
@@ -543,9 +556,10 @@ export default function (pi: ExtensionAPI) {
 			const matches = choices.filter(value => value.toLowerCase().startsWith(current.toLowerCase())).map(value => ({ value: `${base}${value}`, label: value }));
 			return matches.length ? matches : null;
 		};
-		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "clear", "remove", "compact", "promote", "list", "model", "fast", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
+		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "interrupt", "clear", "remove", "compact", "promote", "list", "model", "fast", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
 		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...predefinedDefs().map(def => def.name), "custom"], "add ").map(item => item.label === "custom" ? { ...item, label: "Custom…" } : item);
 		if (command === "tell" && shouldCompleteTellTarget(parts, trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "waiting").map(state => state.name), "tell ");
+		if (command === "interrupt" && (parts.length === 1 && trailing || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => canInterruptAgent(state.status, state === rootAgent)).map(state => state.name), "interrupt ");
 		if (command === "clear" && (parts.length === 1 && trailing || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => canClearAgent(state.status, state === rootAgent)).map(state => state.name), "clear ");
 		if (command === "fast" && (parts.length === 1 || parts.length === 2 && !trailing)) {
 			return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running" && state.status !== "waiting").map(state => state.name), "fast ");
@@ -590,6 +604,11 @@ export default function (pi: ExtensionAPI) {
 					const submitted = await submitAgent(state.name, tell.message, ctx);
 					ctx.ui.notify(`${displayName(state.name)} ${submitted.status === "steered" ? "steering accepted" : "started"}`, "info");
 				} catch (error) { fail(error); }
+				return;
+			}
+			if (command === "interrupt") {
+				if (rest.length !== 1) return void ctx.ui.notify("Usage: /agents interrupt <agent>", "error");
+				try { const state = interruptAgent(rest[0]); ctx.ui.notify(`${displayName(state.name)} interrupted`, "info"); } catch (error) { fail(error); }
 				return;
 			}
 			if (command === "clear") {
@@ -676,13 +695,13 @@ export default function (pi: ExtensionAPI) {
 		if (rootAgent) {
 			rootAgent.task = event.prompt; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens;
 			const catalog = delegationCatalog([...agentStates.values()].filter(state => state !== rootAgent));
-			return { systemPrompt: `${event.systemPrompt}\n\n# Root agent identity: ${rootAgent.name} (${rootAgent.def.name})\nGoal: ${rootAgent.goal}\n\n${rootAgent.def.systemPrompt}\n\nYou are the visible host assistant. Work directly with your enabled tools. You may delegate focused work with dispatch_agent to these instances:\n${catalog}\n${delegationGuidance}\nNever dispatch yourself. Child results are private context; synthesize one coherent answer for the user.` };
+			return { systemPrompt: `${event.systemPrompt}\n\n# Root agent identity: ${rootAgent.name} (${rootAgent.def.name})\nGoal: ${rootAgent.goal}\n\n${rootAgent.def.systemPrompt}\n\nYou are the visible host assistant. Work directly with your enabled tools. You may delegate focused work with dispatch_agent or directly stop a running child with interrupt_agent:\n${catalog}\n${delegationGuidance}\nNever dispatch yourself. Child results are private context; synthesize one coherent answer for the user.` };
 		}
 		// With no instances there is nobody to dispatch to: leave the host prompt alone rather than
 		// telling it to delegate to an empty catalogue.
 		if (!agentStates.size) return;
 		const catalog = delegationCatalog([...agentStates.values()]);
-		return { systemPrompt: `${event.systemPrompt}\n\nYou are a dispatcher. Delegate through dispatch_agent only. Dynamic instances:\n${catalog}\n${delegationGuidance}\nDo not use codebase tools directly. Synthesize child results into one answer.` };
+		return { systemPrompt: `${event.systemPrompt}\n\nYou are a dispatcher. Delegate through dispatch_agent and use interrupt_agent only to stop a running child. Dynamic instances:\n${catalog}\n${delegationGuidance}\nDo not use codebase tools directly. Synthesize child results into one answer.` };
 	});
 	pi.events.on("openai-fast:changed", () => updateWidget());
 	pi.on("model_select", (_event, ctx) => { for (const state of agentStates.values()) if (state.status !== "running") state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); updateWidget(); });

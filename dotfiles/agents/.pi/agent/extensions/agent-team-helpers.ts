@@ -30,6 +30,45 @@ export function canClearAgent(status: string, isRoot: boolean): boolean {
 	return !isRoot && status !== "running" && status !== "waiting";
 }
 
+/** Only an active child has a process that can be interrupted. */
+export function canInterruptAgent(status: string, isRoot: boolean): boolean {
+	return !isRoot && status === "running";
+}
+
+export function shouldIgnoreAgentRunEvent(finished: boolean, stopping: boolean): boolean {
+	return finished || stopping;
+}
+
+type InterruptibleAgentState = {
+	timer?: unknown; elapsed: number; activity: { closeOpenThoughts(): void; append(kind: string, value: unknown): void };
+	sessionFile: string | null; lastWork: string; pendingOutcome?: AgentCompletionStatus; status: string; activeRun?: unknown;
+};
+type InterruptibleAgentRun = {
+	finished: boolean; stopping: boolean; startTime: number; sessionFile: string;
+	transport: { fail(error: Error): void };
+	child: { exitCode: number | null; kill(signal: "SIGTERM" | "SIGKILL"): unknown; once(event: "close", callback: () => void): unknown };
+};
+
+/** Settle an interrupted child without scheduling a result delivery. */
+export function interruptAgentRun(state: InterruptibleAgentState, run: InterruptibleAgentRun, clearTimer: () => void, now = Date.now()): boolean {
+	if (shouldIgnoreAgentRunEvent(run.finished, run.stopping) || state.activeRun !== run) return false;
+	run.finished = true;
+	run.stopping = true;
+	clearTimer();
+	state.timer = undefined;
+	state.elapsed = now - run.startTime;
+	state.activity.closeOpenThoughts();
+	state.lastWork = "Interrupted directly by the main agent.";
+	state.activity.append("tool-error", state.lastWork);
+	state.sessionFile = run.sessionFile;
+	state.pendingOutcome = undefined;
+	state.status = "error";
+	state.activeRun = undefined;
+	run.transport.fail(new Error("Agent interrupted directly"));
+	terminateChild(run.child);
+	return true;
+}
+
 export const OPENAI_FAST_ENV = "PI_AGENT_OPENAI_FAST";
 
 /**
