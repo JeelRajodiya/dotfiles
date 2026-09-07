@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export default function (_pi: ExtensionAPI): void {}
@@ -55,6 +55,48 @@ export function hasRunningAgent(states: Iterable<{ status: string }>): boolean {
 function safePathComponent(value: string, label: string): string {
 	if (!/^[a-zA-Z0-9_-]+$/.test(value)) throw new Error(`Invalid ${label}`);
 	return value;
+}
+
+/**
+ * Encode a working directory the way pi names its own session folders,
+ * e.g. /Users/me/linuxConfig -> --Users-me-linuxConfig--
+ */
+export function encodeCwd(cwd: string): string {
+	const segments = resolve(cwd)
+		.split("/")
+		.filter(Boolean)
+		.map(segment => segment.replace(/[^a-zA-Z0-9]+/g, "-"));
+	return `--${segments.join("-")}--`;
+}
+
+/**
+ * Keep only the `keep` most recently modified parent-session folders under `root`.
+ * Child sessions are disposable transcripts, so old ones are dropped rather than
+ * left to grow without bound.
+ */
+export function pruneSessionDirs(root: string, keep: number): void {
+	if (!existsSync(root)) return;
+	let entries: string[];
+	try {
+		entries = readdirSync(root);
+	} catch {
+		return;
+	}
+	const dirs: { path: string; mtime: number }[] = [];
+	for (const entry of entries) {
+		const path = join(root, entry);
+		try {
+			const stats = statSync(path);
+			if (stats.isDirectory()) dirs.push({ path, mtime: stats.mtimeMs });
+		} catch {}
+	}
+	if (dirs.length <= keep) return;
+	dirs.sort((a, b) => b.mtime - a.mtime);
+	for (const dir of dirs.slice(keep)) {
+		try {
+			rmSync(dir.path, { recursive: true, force: true });
+		} catch {}
+	}
 }
 
 export function childSessionPath(root: string, parentSessionId: string, agentName: string): string {

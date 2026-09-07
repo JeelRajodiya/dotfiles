@@ -19,22 +19,24 @@
  * Usage: pi -e extensions/agent-team.ts
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Text, type AutocompleteItem, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { randomUUID } from "crypto";
-import { readdirSync, readFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "fs";
+import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join, resolve } from "path";
 import {
 	AgentRpcTransport,
 	childSessionPath,
 	contextTokensFromUsage,
+	encodeCwd,
 	formatAgentContext,
 	hasRunningAgent,
 	latestAssistantContextTokens,
 	latestChildTranscript,
+	pruneSessionDirs,
 	shouldFinalizeAgentEvent,
 	terminateChild,
 } from "./agent-team-helpers";
@@ -170,6 +172,8 @@ function scanAgentDirs(cwd: string): AgentDef[] {
 // ── Extension ────────────────────────────────────
 
 const TEAM_TOOLS = ["dispatch_agent", "set_agent_model"];
+/** Parent-session transcript folders kept per project before the oldest are dropped. */
+const MAX_KEPT_SESSIONS = 20;
 
 export default function (pi: ExtensionAPI) {
 	const agentStates: Map<string, AgentState> = new Map();
@@ -255,11 +259,13 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function loadAgents(cwd: string) {
-		// Create session storage dir
-		sessionDir = join(cwd, ".pi", "agent-sessions");
+		// Child transcripts live beside pi's own sessions, not inside the project,
+		// so working trees stay clean. Keyed by cwd the way pi keys its sessions.
+		sessionDir = join(getAgentDir(), "agent-team-sessions", encodeCwd(cwd));
 		if (!existsSync(sessionDir)) {
 			mkdirSync(sessionDir, { recursive: true });
 		}
+		pruneSessionDirs(sessionDir, MAX_KEPT_SESSIONS);
 
 		// Load all agent definitions
 		allAgentDefs = scanAgentDirs(cwd);
