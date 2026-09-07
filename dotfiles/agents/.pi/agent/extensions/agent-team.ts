@@ -293,10 +293,10 @@ export default function (pi: ExtensionAPI) {
 		const statusLine = theme.fg(statusColor, statusStr + timeStr);
 		const statusVisible = statusStr.length + timeStr.length;
 
-		// Context bar: 5 blocks + percent
-		const filled = Math.ceil(state.contextPct / 20);
-		const bar = "#".repeat(filled) + "-".repeat(5 - filled);
-		const ctxStr = `[${bar}] ${Math.ceil(state.contextPct)}%`;
+		const formatTokens = (tokens: number) => tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : `${Math.round(tokens)}`;
+		const ctxStr = contextWindow > 0 && Number.isFinite(state.contextPct)
+			? `${formatTokens(state.contextPct * contextWindow / 100)}/${formatTokens(contextWindow)}`
+			: "?/?";
 		const ctxLine = theme.fg("dim", ctxStr);
 		const ctxVisible = ctxStr.length;
 
