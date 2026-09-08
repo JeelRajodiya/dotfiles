@@ -36,6 +36,15 @@ export function canInterruptAgent(status: string, isRoot: boolean): boolean {
 	return !isRoot && status === "running";
 }
 
+/** Allocate the first positive instance suffix without changing existing identities. */
+export function nextAgentName(base: string, existingNames: Iterable<string>): string {
+	const normalizedBase = base.trim().toLowerCase().replace(/\s+/g, "-");
+	const existing = new Set(Array.from(existingNames, name => name.toLowerCase()));
+	let suffix = 1;
+	while (existing.has(`${normalizedBase}-${suffix}`)) suffix++;
+	return `${normalizedBase}-${suffix}`;
+}
+
 export const isAgentReturning = (status: string): boolean => status === "waiting";
 
 export function shouldIgnoreAgentRunEvent(finished: boolean, stopping: boolean): boolean {

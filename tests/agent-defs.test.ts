@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
-import { canClearAgent, formatAgentModelLabel, parseOpenAIFastEnvValue, parseTellArguments, resultDeliveryStatus, rootTools, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
+import { canClearAgent, formatAgentModelLabel, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, resultDeliveryStatus, rootTools, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
 
@@ -28,6 +28,9 @@ assert.equal(canClearAgent("done", false), true);
 assert.equal(canClearAgent("running", false), false);
 assert.equal(canClearAgent("waiting", false), false);
 assert.equal(canClearAgent("idle", true), false);
+assert.equal(nextAgentName("iterate", []), "iterate-1");
+assert.equal(nextAgentName("iterate", ["iterate-1"]), "iterate-2");
+assert.equal(nextAgentName("Iterate", ["iterate-1", "ITERATE-2", "iterate-4"]), "iterate-3");
 
 assert.equal(parseOpenAIFastEnvValue("on"), true);
 assert.equal(parseOpenAIFastEnvValue("off"), false);

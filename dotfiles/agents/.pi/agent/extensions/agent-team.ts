@@ -9,7 +9,7 @@ import { join } from "path";
 import {
 	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, canClearAgent, canInterruptAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
 	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, latestChildActivity, readChildSession,
-	OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent, shouldIgnoreAgentRunEvent,
+	nextAgentName, OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent, shouldIgnoreAgentRunEvent,
 	restoreWaitingAgents, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
 	terminateChild, type AgentCompletionStatus, type TokenCounts,
 } from "./agent-team-helpers.ts";
@@ -132,6 +132,11 @@ export default function (pi: ExtensionAPI) {
 	function persistTeam() {
 		pi.appendEntry("agent-team-instances", { instances: [...agentStates.values()].map(state => ({ name: state.name, type: state.def.name, goal: state.goal, autoName: state.autoName, sessionKey: state.sessionKey })), root: rootAgent?.name });
 	}
+	function addDefaultAgent(def: AgentDef) {
+		if ([...agentStates.values()].some(state => key(state.def.name) === key(def.name))) return;
+		const name = nextAutoName(def);
+		agentStates.set(key(name), makeState(def, name, def.description, true, randomUUID()));
+	}
 	function restoreTeam(ctx: any) {
 		const entries = ctx.sessionManager.getEntries();
 		const snapshot = entries.filter((entry: any) => entry.type === "custom" && entry.customType === "agent-team-instances").pop();
@@ -149,12 +154,12 @@ export default function (pi: ExtensionAPI) {
 		const team = teams[legacy?.team ?? DEFAULT_TEAM];
 		for (const member of team?.members ?? []) {
 			const def = definitionFor(member);
-			if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
+			if (def) addDefaultAgent(def);
 		}
 		if (team?.root) {
 			const def = definitionFor(team.root);
-			if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
-			rootAgent = stateFor(team.root);
+			if (def) addDefaultAgent(def);
+			rootAgent = def ? [...agentStates.values()].find(state => key(state.def.name) === key(def.name)) : undefined;
 		}
 		persistTeam();
 	}
@@ -210,32 +215,8 @@ export default function (pi: ExtensionAPI) {
 		applyActiveTools(); persistTeam(); updateWidget(); syncStatus(ctx);
 		ctx.ui.notify(`${displayName(previous.name)} is no longer this session's root; it is a dispatchable instance again.`, "info");
 	}
-	function renameAutoInstance(state: AgentState, name: string) {
-		if (state.status === "running") throw new Error(`Cannot add another ${state.def.name} while ${state.name} is running`);
-		const oldKey = key(state.name); const modelOverride = agentModelOverrides.get(oldKey); const fastOverride = agentFastOverrides.get(oldKey);
-		agentStates.delete(oldKey); state.name = name; agentStates.set(key(name), state);
-		syncStatus();
-		if (modelOverride !== undefined) {
-			agentModelOverrides.delete(oldKey);
-			agentModelOverrides.set(key(name), modelOverride);
-			pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) });
-		}
-		if (fastOverride !== undefined) {
-			agentFastOverrides.delete(oldKey);
-			agentFastOverrides.set(key(name), fastOverride);
-			pi.appendEntry("agent-team-fast-overrides", { overrides: Object.fromEntries(agentFastOverrides) });
-		}
-	}
-	function nextAutoName(def: AgentDef): { name: string; rename?: { state: AgentState; name: string } } {
-		const base = normalizeName(def.name); const existing = stateFor(base);
-		let suffix = 1; while (stateFor(`${base}-${suffix}`)) suffix++;
-		if (def === CUSTOM_AGENT) return { name: existing ? `${base}-${suffix}` : base };
-		if (!existing) return [...agentStates.values()].some(state => state.autoName && key(state.def.name) === key(def.name)) ? { name: `${base}-${suffix}` } : { name: base };
-		if (!existing.autoName) return { name: `${base}-${suffix}` };
-		if (existing.status === "running") throw new Error(`Cannot add another ${def.name} while ${existing.name} is running`);
-		const renamed = `${base}-${suffix}`; suffix++;
-		while (stateFor(`${base}-${suffix}`)) suffix++;
-		return { name: `${base}-${suffix}`, rename: { state: existing, name: renamed } };
+	function nextAutoName(def: AgentDef): string {
+		return nextAgentName(def.name, [...agentStates.values()].map(state => state.name));
 	}
 	async function addAgent(rest: string[], ctx: any, usage: string) {
 		let [type, rawName, ...extra] = rest;
@@ -244,12 +225,11 @@ export default function (pi: ExtensionAPI) {
 			if (!selected) return;
 			type = selected === "Custom…" ? "custom" : selected;
 		}
-		const def = definitionFor(type); const explicit = rawName !== undefined; const autoName = !explicit && def ? nextAutoName(def) : undefined; const name = explicit ? normalizeName(rawName || "") : autoName?.name || "";
+		const def = definitionFor(type); const explicit = rawName !== undefined; const autoName = !explicit && def ? nextAutoName(def) : undefined; const name = explicit ? normalizeName(rawName || "") : autoName || "";
 		if (!def || extra.length || explicit && !/^[a-z0-9_-]+$/.test(name)) return void ctx.ui.notify(`Usage: ${usage} <type|custom> [name]`, "error");
 		if (agentStates.has(key(name))) return void ctx.ui.notify(`Instance "${name}" already exists`, "error");
 		const goal = def === CUSTOM_AGENT ? (await ctx.ui.input("Custom goal", "Goal for this instance"))?.trim() : def.description || `Work as ${displayName(def.name)}`;
 		if (!goal) return;
-		if (autoName?.rename) renameAutoInstance(autoName.rename.state, autoName.rename.name);
 		const state = makeState(def, name, goal, !explicit, randomUUID()); agentStates.set(key(name), state); applyActiveTools(); persistTeam(); updateWidget(); syncStatus(ctx); ctx.ui.notify(`Added ${displayName(name)} (${def.name})`, "info");
 	}
 	/** Drop a child transcript that is no longer reachable through any instance. */
@@ -562,15 +542,15 @@ export default function (pi: ExtensionAPI) {
 		const team = teamName ? teams[teamName] : undefined;
 		for (const member of team?.members ?? []) {
 			const def = definitionFor(member);
-			if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
+			if (def) addDefaultAgent(def);
 		}
 		pi.appendEntry("agent-team-model-overrides", { overrides: {} });
 		pi.appendEntry("agent-team-fast-overrides", { overrides: {} });
 		persistTeam(); applyActiveTools();
 		if (team?.root) {
 			const def = definitionFor(team.root);
-			if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
-			const root = stateFor(team.root);
+			if (def) addDefaultAgent(def);
+			const root = def ? [...agentStates.values()].find(state => key(state.def.name) === key(def.name)) : undefined;
 			if (root) await promote(root, ctx);
 		}
 		updateWidget(); syncStatus(ctx);
@@ -653,7 +633,7 @@ export default function (pi: ExtensionAPI) {
 				if (!state) {
 					const def = promotableBaseDefs().find(candidate => key(candidate.name) === key(name));
 					if (!def) return void ctx.ui.notify("Usage: /agents promote <instance|base>", "error");
-					state = makeState(def, normalizeName(def.name), def.description || `Work as ${displayName(def.name)}`, false, randomUUID());
+					state = makeState(def, nextAutoName(def), def.description || `Work as ${displayName(def.name)}`, true, randomUUID());
 					agentStates.set(key(state.name), state); created = true;
 				}
 				if (state === rootAgent) return void ctx.ui.notify("Usage: /agents promote <instance|base>", "error");
