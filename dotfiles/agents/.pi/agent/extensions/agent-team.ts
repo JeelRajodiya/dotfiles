@@ -576,7 +576,7 @@ export default function (pi: ExtensionAPI) {
 			return matches.length ? matches : null;
 		};
 		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "interrupt", "clear", "remove", "compact", "promote", "list", "model", "fast", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
-		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...predefinedDefs().map(def => def.name), "custom"], "add ").map(item => item.label === "custom" ? { ...item, label: "Custom…" } : item);
+		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...predefinedDefs().map(def => def.name), "custom"], "add ")?.map(item => item.label === "custom" ? { ...item, label: "Custom…" } : item) ?? null;
 		if (command === "tell" && shouldCompleteTellTarget(parts, trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "waiting").map(state => state.name), "tell ");
 		if (command === "interrupt" && (parts.length === 1 && trailing || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => canInterruptAgent(state.status, state === rootAgent)).map(state => state.name), "interrupt ");
 		if (command === "clear" && (parts.length === 1 && trailing || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => canClearAgent(state.status, state === rootAgent)).map(state => state.name), "clear ");
