@@ -20,7 +20,7 @@ import { FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } fro
 interface ActiveAgentRun {
 	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; text: TextTail; stderrChunks: string[]; initialTask: string;
 	sessionFile: string; startTime: number; runId: string; usageSequence: number; accepted: boolean; finished: boolean; stopping: boolean;
-	output: OutputBuffer; toolStarts: Map<string, { summary: string; startTime: number }>; fast: boolean;
+	output: OutputBuffer; toolStarts: Map<string, { summary: string; startTime: number }>; fast: boolean; thinking: string;
 }
 interface AgentState {
 	name: string; def: AgentDef; goal: string; status: AgentStatus; pendingOutcome?: AgentCompletionStatus; task: string;
@@ -301,6 +301,7 @@ export default function (pi: ExtensionAPI) {
 					...state,
 					model: effectiveModel(state, widgetCtx),
 					fast: state === rootAgent ? hostFastMode(widgetCtx) : state.activeRun?.fast ?? effectiveFast(state, widgetCtx),
+					thinking: state === rootAgent ? widgetCtx.thinkingLevel ?? "off" : state.activeRun?.thinking ?? widgetCtx.thinkingLevel ?? "off",
 				}));
 				text.setText(renderGrid(cards, renderWidth, gridCols, theme).join("\n"));
 				return text.render(renderWidth);
@@ -376,13 +377,14 @@ export default function (pi: ExtensionAPI) {
 		const childExtensions = ["openai-codex-fast.ts", "ponytail.ts"]
 			.map(name => join(getAgentDir(), "extensions", name)).filter(existsSync)
 			.flatMap(path => ["--extension", path]);
-		const args = ["--mode", "rpc", "--no-extensions", ...childExtensions, "--model", effectiveModel(state, ctx), "--tools", state.def.tools, "--thinking", ctx.thinkingLevel ?? "off", "--append-system-prompt", `${state.def.systemPrompt}\n\n# Assigned goal\n${state.goal}`, "--session", file];
+		const thinking = ctx.thinkingLevel ?? "off";
+		const args = ["--mode", "rpc", "--no-extensions", ...childExtensions, "--model", effectiveModel(state, ctx), "--tools", state.def.tools, "--thinking", thinking, "--append-system-prompt", `${state.def.systemPrompt}\n\n# Assigned goal\n${state.goal}`, "--session", file];
 		if (state.sessionFile) args.push("-c");
 		const fast = effectiveFast(state, ctx);
 		const childEnv = { ...process.env, [OPENAI_FAST_ENV]: fast ? "on" : "off" };
 		const child = spawn(process.env.PI_BIN || "pi", args, { stdio: ["pipe", "pipe", "pipe"], env: childEnv });
 		const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
-		const run: ActiveAgentRun = { child, transport, text: new TextTail(), stderrChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, output: new OutputBuffer(), toolStarts: new Map(), fast }; state.activeRun = run; updateWidget();
+		const run: ActiveAgentRun = { child, transport, text: new TextTail(), stderrChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, output: new OutputBuffer(), toolStarts: new Map(), fast, thinking }; state.activeRun = run; updateWidget();
 		let buffer = ""; const appendActivity = (kind: ActivityKind, value: unknown) => state.activity.append(kind, value);
 		const persistUsage = (kind: string, message: any, usage: any) => { if (!usage || typeof usage !== "object") return; state.tokens = addTokenCounts(state.tokens, tokenCountsFromUsage(usage)); pi.appendEntry("agent-team-usage", { sourceEventId: `${run.runId}:${kind}:${++run.usageSequence}`, usage, provider: message?.provider, model: message?.model }); pi.events.emit("agent-team:usage", { agent: state.name }); updateWidget(); };
 		const toolSummary = (event: any) => formatToolActivity(event.toolName, event.args ?? event.input ?? event.parameters);
@@ -741,6 +743,7 @@ export default function (pi: ExtensionAPI) {
 		return { systemPrompt: `${event.systemPrompt}\n\nYou are a dispatcher. Delegate through dispatch_agent and use interrupt_agent only to stop a running child. Dynamic instances:\n${catalog}\n${delegationGuidance}\nDo not use codebase tools directly. Synthesize child results into one answer.` };
 	});
 	pi.events.on("openai-fast:changed", () => updateWidget());
+	pi.on("thinking_level_select", () => updateWidget());
 	pi.on("model_select", (_event, ctx) => { for (const state of agentStates.values()) if (state.status !== "running") state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); updateWidget(); });
 	pi.on("agent_start", (_event, ctx) => {
 		hostBusy = true;

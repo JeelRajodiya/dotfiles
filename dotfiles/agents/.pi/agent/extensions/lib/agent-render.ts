@@ -23,6 +23,7 @@ export interface RenderableAgent {
 	pendingOutcome?: "done" | "error";
 	model: string;
 	fast?: boolean;
+	thinking?: string;
 }
 
 /** Card geometry. renderGrid pads short columns to CARD_LINES, so keep the two in step. */
@@ -86,7 +87,7 @@ export function renderCard(agent: RenderableAgent, width: number, theme: Theme, 
 	const vital = visibleWidth(telemetry) <= inner - 4 ? telemetry : waiting || elapsed || truncateToWidth(String(agent.toolCount), Math.max(1, inner - 4));
 	const identityLeft = `${name} ${context}`;
 	const tokens = formatAgentTokens(agent.tokens);
-	const model = formatAgentModelLabel(agent.model, agent.fast);
+	const model = `${formatAgentModelLabel(agent.model, agent.fast)} · ${agent.thinking ?? "off"}`;
 	const identityWidth = Math.max(1, inner - visibleWidth(vital) - 1);
 	const compactIdentity = visibleWidth(identityLeft) <= identityWidth ? identityLeft
 		: `${theme.fg(statusColor(agent.status), statusGlyph(agent.status, now))} ${theme.bold(theme.fg("accent", truncateToWidth(agent.name, Math.max(1, identityWidth - 2))))}`;

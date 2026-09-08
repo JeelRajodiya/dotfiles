@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
 import { canClearAgent, formatAgentModelLabel, parseOpenAIFastEnvValue, parseTellArguments, resultDeliveryStatus, rootTools, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
 
 assert.deepEqual(parseTeams("flat:\n  - planner\n  - builder\nrooted:\n  main: understand\n  subs:\n    - iterate\n"), {
@@ -38,12 +39,12 @@ assert.equal(formatAgentModelLabel("anthropic/claude-4", true), "claude-4");
 const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 const elapsedCard = renderCard({
 	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "done",
-	model: "openai-codex/gpt-5.6-sol", fast: true, toolCount: 7, elapsed: 12_000, contextTokens: 0,
+	model: "openai-codex/gpt-5.6-sol", fast: true, thinking: "high", toolCount: 7, elapsed: 12_000, contextTokens: 0,
 	contextWindow: 0, tokens: { input: 1_200, output: 300 },
 }, 80, plainTheme);
 assert.equal(elapsedCard.length, 4);
 assert.match(elapsedCard[1], /7 · 12s/);
-assert.match(elapsedCard[2], /gpt-5.6-sol \(fast\)/);
+assert.match(elapsedCard[2], /gpt-5.6-sol \(fast\) · high/);
 
 const waitingCard = renderCard({
 	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "waiting",
@@ -69,8 +70,13 @@ const grid = renderGrid([
 	},
 ], 80, 3, plainTheme);
 assert.equal(grid.length, 4);
-assert.match(grid.join("\n"), /↑↓ gpt-5.6-sol \(fast\)/);
+assert.match(grid.join("\n"), /↑↓ gpt-5.6-sol/);
 
+const coloredTheme = { fg: (_color: string, text: string) => `\x1b[31m${text}\x1b[0m`, bold: (text: string) => `\x1b[1m${text}\x1b[0m` };
+assert.equal(renderCard({
+	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "running",
+	model: "openai-codex/gpt-5.6-sol", thinking: "high", toolCount: 0, elapsed: 0, contextTokens: 0, contextWindow: 0, tokens: { input: 0, output: 0 },
+}, 20, coloredTheme).every(line => visibleWidth(line) <= 20), true);
 
 const detail = renderDetail({
 	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "done",
