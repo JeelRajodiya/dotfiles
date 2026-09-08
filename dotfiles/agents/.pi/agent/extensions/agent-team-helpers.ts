@@ -36,6 +36,8 @@ export function canInterruptAgent(status: string, isRoot: boolean): boolean {
 	return !isRoot && status === "running";
 }
 
+export const isAgentReturning = (status: string): boolean => status === "waiting";
+
 export function shouldIgnoreAgentRunEvent(finished: boolean, stopping: boolean): boolean {
 	return finished || stopping;
 }
