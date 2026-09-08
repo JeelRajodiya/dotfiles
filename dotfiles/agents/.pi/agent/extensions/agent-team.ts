@@ -7,7 +7,7 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
-	appendTaskHistory, addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, decideRouting, canClearAgent, canInterruptAgent, canKillHostAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
+	appendTaskHistory, addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, decideRouting, canClearAgent, canCompactAgent, canInterruptAgent, canKillHostAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
 	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, latestChildActivity, readChildSession,
 	nextAgentName, OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, removeQueuedItem, resultDeliveryStatus, restoreNextWaitingAgent, shouldIgnoreAgentRunEvent, updateQueuedItem,
 	restoreWaitingAgents, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
@@ -595,6 +595,27 @@ export default function (pi: ExtensionAPI) {
 			throw failure;
 		}
 	}
+	const subagents = () => [...agentStates.values()].filter(state => state !== rootAgent);
+	async function compactAllSubagents(ctx: any) {
+		const compacted: string[] = []; const skipped: string[] = []; const failed: string[] = [];
+		for (const state of subagents()) {
+			if (!canCompactAgent(state.status, false, !!state.sessionFile)) { skipped.push(state.name); continue; }
+			try { await compactAgent(state.name, ctx); compacted.push(state.name); } catch { failed.push(state.name); }
+		}
+		const summary = [`compacted: ${compacted.join(", ") || "none"}`, `skipped: ${skipped.join(", ") || "none"}`, `failed: ${failed.join(", ") || "none"}`].join("\n");
+		ctx.ui.notify(summary, failed.length ? "warning" : "success");
+	}
+	async function clearAllSubagents(ctx: any) {
+		const candidates = subagents().filter(state => canClearAgent(state.status, false));
+		if (!candidates.length) return void ctx.ui.notify("No settled subagents to clear", "info");
+		if (!await ctx.ui.confirm("Clear all subagents?", `Delete saved child conversations for ${candidates.map(state => state.name).join(", ")}. Instances remain, but cleared conversations cannot be recovered.`)) return;
+		const cleared: string[] = []; const skipped: string[] = [];
+		for (const state of candidates) {
+			if (stateFor(state.name) !== state || !canClearAgent(state.status, false)) { skipped.push(state.name); continue; }
+			clearAgent(state); cleared.push(state.name);
+		}
+		ctx.ui.notify([`cleared: ${cleared.join(", ") || "none"}`, `skipped: ${skipped.join(", ") || "none"}`].join("\n"), "success");
+	}
 
 	pi.registerTool({ name: "dispatch_agent", label: "Dispatch Agent", description: "Dispatch or steer a named dynamic team instance. Results return privately for one host response.", parameters: Type.Object({ agent: Type.String({ description: "Unique dynamic instance name" }), task: Type.String({ description: "Focused task" }) }),
 		async execute(_id, params, _signal, _update, ctx) { const { agent, task } = params as { agent: string; task: string }; const submitted = await submitAgent(agent, task, ctx); return { content: [{ type: "text", text: `${displayName(agent)} ${submitted.status === "steered" ? "steering accepted" : "is working in the background"}.` }], details: { agent, status: submitted.status } }; },
@@ -609,7 +630,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({ name: "interrupt_agent", label: "Interrupt Agent", description: "Immediately terminate a running child agent without sending it a prompt.", parameters: Type.Object({ agent: Type.String({ description: "Running child instance name" }) }), async execute(_id, params) { const state = interruptAgent((params as { agent: string }).agent); return { content: [{ type: "text", text: `${displayName(state.name)} interrupted.` }], details: { agent: state.name, status: state.status } }; } });
 	pi.registerTool({ name: "set_agent_model", label: "Set Agent Model", description: "Set a session model for a named dynamic instance.", parameters: Type.Object({ agent: Type.String(), model: Type.String() }), async execute(_id, params, _signal, _update, ctx) { const { agent, model } = params as { agent: string; model: string }; const state = stateFor(agent); if (!state) throw new Error(`Unknown dynamic instance "${agent}"`); if (state === rootAgent) throw new Error("Change the root model with /agents model <name> <model|inherit> when the host is idle"); return { content: [{ type: "text", text: `${state.name}: ${setInstanceModel(state, model, ctx)}` }], details: { agent: state.name } }; } });
 
-	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | interrupt <agent> | clear <subagent-name> | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | fast <name> [on|off] | auto-spawn <on|off|limit N> | queue [edit <id> <task|target> ...|remove <id>] | view <name> | exit | grid <1-6> | team <team-name|off>";
+	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | interrupt <agent> | clear <subagent-name> | clear-all-sub | remove <name> | compact <name> | compact-all-sub | promote <instance|base> | demote | list | model <name> [model|inherit] | fast <name> [on|off] | auto-spawn <on|off|limit N> | queue [edit <id> <task|target> ...|remove <id>] | view <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
 	const teamSnapshot = (teamName: string | undefined): SavedTeam => {
@@ -651,7 +672,7 @@ export default function (pi: ExtensionAPI) {
 			const matches = choices.filter(value => value.toLowerCase().startsWith(current.toLowerCase())).map(value => ({ value: `${base}${value}`, label: value }));
 			return matches.length ? matches : null;
 		};
-		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "interrupt", "clear", "remove", "compact", "promote", "list", "model", "fast", "auto-spawn", "queue", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
+		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "interrupt", "clear", "clear-all-sub", "remove", "compact", "compact-all-sub", "promote", "list", "model", "fast", "auto-spawn", "queue", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
 		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...predefinedDefs().map(def => def.name), "custom"], "add ")?.map(item => item.label === "custom" ? { ...item, label: "Custom…" } : item) ?? null;
 		if (command === "tell" && shouldCompleteTellTarget(parts, trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "waiting").map(state => state.name), "tell ");
 		if (command === "interrupt" && (parts.length === 1 && trailing || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => canInterruptAgent(state.status, state === rootAgent)).map(state => state.name), "interrupt ");
@@ -717,8 +738,10 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`${displayName(state.name)} cleared`, "info");
 				return;
 			}
+			if (command === "clear-all-sub") { if (rest.length) return void ctx.ui.notify("Usage: /agents clear-all-sub", "error"); try { await clearAllSubagents(ctx); } catch (error) { fail(error); } return; }
 			if (command === "remove") { const state = stateFor(name); if (!state) return void ctx.ui.notify(`Unknown instance "${name}". Usage: /agents remove <name>`, "error"); try { removeAgent(state, ctx); } catch (error) { fail(error); } return; }
 			if (command === "compact") { if (!name) return void ctx.ui.notify("Usage: /agents compact <name>", "error"); try { await compactAgent(name, ctx); } catch (error) { fail(error); } return; }
+			if (command === "compact-all-sub") { if (rest.length) return void ctx.ui.notify("Usage: /agents compact-all-sub", "error"); try { await compactAllSubagents(ctx); } catch (error) { fail(error); } return; }
 			if (command === "promote") {
 				let state = stateForPromotion(name); let created = false;
 				if (!state) {

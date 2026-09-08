@@ -31,6 +31,10 @@ export function canClearAgent(status: string, isRoot: boolean): boolean {
 	return !isRoot && status !== "running" && status !== "waiting";
 }
 
+export function canCompactAgent(status: string, isRoot: boolean, hasSession: boolean): boolean {
+	return hasSession && canClearAgent(status, isRoot);
+}
+
 /** Only an active child has a process that can be interrupted. */
 export function canInterruptAgent(status: string, isRoot: boolean): boolean {
 	return !isRoot && status === "running";
