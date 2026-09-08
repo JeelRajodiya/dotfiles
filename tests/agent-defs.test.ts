@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
-import { canClearAgent, formatAgentModelLabel, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, resultDeliveryStatus, rootTools, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
+import { canClearAgent, formatAgentModelLabel, formatToolActivity, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, resultDeliveryStatus, rootTools, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
 
@@ -88,4 +88,26 @@ const detail = renderDetail({
 }, 120, plainTheme, { model: formatAgentModelLabel("openai-codex/gpt-5.6-sol", true), activity: [], steerable: true }, 1);
 assert.match(detail, /gpt-5.6-sol \(fast\)/);
 
-console.log("PASS: teams parse; openai fast parsing, model label formatting, and rendering markers are correct");
+assert.equal(formatToolActivity("bash", { command: "git status --short" }), "git status --short");
+assert.equal(formatToolActivity("read", { path: "src/main.ts" }), "src/main.ts");
+assert.equal(formatToolActivity("bash", {}), "bash");
+const compactDetail = renderDetail({
+	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "done",
+	toolCount: 0, elapsed: 0, contextTokens: 0, contextWindow: 0, tokens: { input: 0, output: 0 }, model: "test/model",
+}, 40, plainTheme, {
+	model: "test/model", steerable: true,
+	activity: [
+		{ kind: "assistant", text: "assistant row\ncontinued " + "x".repeat(50) },
+		{ kind: "thought", text: "thought row " + "x".repeat(50), startedAt: 0, finishedAt: 0 },
+		{ kind: "tool-start", text: formatToolActivity("bash", { command: "git status --short --branch " + "x".repeat(50) }) },
+		{ kind: "tool-done", text: "tool done row" },
+		{ kind: "tool-error", text: "tool error row" },
+	],
+}, 0);
+const compactRows = compactDetail.split("\n");
+assert.equal(compactRows.filter(row => /assistant row continued|Thinking \(0s\) — thought row|git status --short|tool done row|tool error row/.test(row)).length, 5);
+assert.equal(compactRows.some(row => row.includes("◆") || row.includes("bash — command:")), false);
+assert.equal(compactRows.every(row => visibleWidth(row) <= 40), true);
+assert.equal(compactRows.some(row => row.includes("…")), true);
+
+console.log("PASS: teams parse; compact activity rows, model label formatting, and rendering markers are correct");

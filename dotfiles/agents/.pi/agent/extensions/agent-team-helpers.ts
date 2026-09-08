@@ -265,9 +265,9 @@ const shortActivityText = (value: unknown, max = 180) => {
 };
 export function formatToolActivity(name: unknown, args: unknown): string {
 	const values = args && typeof args === "object" ? args as Record<string, unknown> : {};
-	const details = ["path", "file", "pattern", "command", "description", "query", "url", "agent", "task"]
-		.flatMap(key => values[key] === undefined ? [] : [`${key}: ${shortActivityText(values[key], 96)}`]);
-	return `${cleanActivityText(name) || "tool"}${details.length ? ` — ${details.slice(0, 2).join(" · ")}` : ""}`;
+	const details = ["command", "path", "file", "pattern", "description", "query", "url", "agent", "task"]
+		.flatMap(key => values[key] === undefined ? [] : [shortActivityText(values[key])]);
+	return details.slice(0, 2).join(" · ") || cleanActivityText(name) || "tool";
 }
 
 /** Compact, safe timeline recovered from a child Pi JSONL session. */

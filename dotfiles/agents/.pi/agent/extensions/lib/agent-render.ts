@@ -35,7 +35,6 @@ export const FRAME_MS = 80;
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const STATUS_ICON: Record<string, string> = { waiting: "↗", done: "✓", error: "✗", idle: "○" };
 const STATUS_COLOR: Record<string, string> = { running: "accent", waiting: "warning", done: "success", error: "error", idle: "dim" };
-const ACTIVITY_GLYPH: Record<string, string> = { user: "▸", assistant: "·", thought: "·", "tool-start": "◆", "tool-done": "✓", "tool-error": "✗" };
 const ACTIVITY_COLOR: Record<string, string> = { user: "accent", assistant: "text", thought: "muted", "tool-start": "dim", "tool-done": "success", "tool-error": "error" };
 
 type Theme = { fg(color: string, text: string): string; bold(text: string): string };
@@ -125,9 +124,7 @@ export interface DetailOptions {
 }
 
 export function renderThoughtActivity(entry: ActivityEntry, width: number, now?: number): string {
-	const prefix = "  · ";
-	if (width <= visibleWidth(prefix)) return truncateToWidth(prefix, width, "");
-	return `${prefix}${truncateToWidth(thoughtActivityLabel(entry, now), width - visibleWidth(prefix), "…")}`;
+	return truncateToWidth(thoughtActivityLabel(entry, now).replace(/\s+/g, " ").trim(), width, "…");
 }
 
 /** The expanded single-agent view behind `/agents view <name>`, where prose has room. */
@@ -146,11 +143,8 @@ export function renderDetail(agent: RenderableAgent, width: number, theme: Theme
 	const activity = options.activity.map(entry =>
 		entry.kind === "thought"
 			? theme.fg("muted", renderThoughtActivity(entry, width, now))
-			: truncateToWidth(
-				`  ${theme.fg(ACTIVITY_COLOR[entry.kind] ?? "muted", ACTIVITY_GLYPH[entry.kind] ?? "·")} ` +
-				theme.fg(entry.kind === "assistant" ? "text" : "muted", entry.text),
-				width,
-			),
+			: theme.fg(entry.kind === "assistant" ? "text" : (ACTIVITY_COLOR[entry.kind] ?? "muted"),
+				truncateToWidth(entry.text.replace(/\s+/g, " ").trim(), width, "…")),
 	);
 
 	return [
