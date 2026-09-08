@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
-import { canClearAgent, canCompactAgent, formatAgentModelLabel, formatToolActivity, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, resultDeliveryStatus, rootTools, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
+import { canClearAgent, canCompactAgent, canSteerAgent, formatAgentModelLabel, formatToolActivity, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, resultDeliveryStatus, rootTools, runConcurrent, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
 
@@ -33,6 +33,19 @@ assert.equal(canCompactAgent("idle", true, true), false);
 assert.equal(canCompactAgent("running", false, true), false);
 assert.equal(canCompactAgent("waiting", false, true), false);
 assert.equal(canCompactAgent("done", false, false), false);
+assert.equal(canSteerAgent("running", false), true);
+assert.equal(canSteerAgent("running", true), false);
+assert.equal(canSteerAgent("done", false), false);
+const starts: string[] = [];
+let resolveFirst!: (value: string) => void;
+let rejectSecond!: (error: Error) => void;
+const concurrent = runConcurrent([
+	() => { starts.push("first"); return new Promise<string>(resolve => { resolveFirst = resolve; }); },
+	() => { starts.push("second"); return new Promise<string>((_resolve, reject) => { rejectSecond = reject; }); },
+]);
+assert.deepEqual(starts, ["first", "second"], "all compactions start before any settles");
+resolveFirst("first"); rejectSecond(new Error("failed"));
+assert.deepEqual((await concurrent).map(result => result.status), ["fulfilled", "rejected"]);
 assert.equal(nextAgentName("iterate", []), "iterate-1");
 assert.equal(nextAgentName("iterate", ["iterate-1"]), "iterate-2");
 assert.equal(nextAgentName("Iterate", ["iterate-1", "ITERATE-2", "iterate-4"]), "iterate-3");

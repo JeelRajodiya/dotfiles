@@ -7,9 +7,9 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
-	appendTaskHistory, addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, decideRouting, canClearAgent, canCompactAgent, canInterruptAgent, canKillHostAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
+	appendTaskHistory, addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, decideRouting, canClearAgent, canCompactAgent, canInterruptAgent, canKillHostAgent, canSteerAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
 	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, latestChildActivity, readChildSession,
-	nextAgentName, OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, removeQueuedItem, resultDeliveryStatus, restoreNextWaitingAgent, shouldIgnoreAgentRunEvent, updateQueuedItem,
+	nextAgentName, OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, removeQueuedItem, resultDeliveryStatus, restoreNextWaitingAgent, runConcurrent, shouldIgnoreAgentRunEvent, updateQueuedItem,
 	restoreWaitingAgents, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
 	terminateChild, type AgentCompletionStatus, type AgentOrigin, type TaskHistoryEntry, type TokenCounts,
 } from "./agent-team-helpers.ts";
@@ -19,7 +19,7 @@ import { FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } fro
 
 interface ActiveAgentRun {
 	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; text: TextTail; stderrChunks: string[]; initialTask: string; tasks: string[];
-	sessionFile: string; startTime: number; runId: string; usageSequence: number; accepted: boolean; finished: boolean; stopping: boolean;
+	sessionFile: string; startTime: number; runId: string; usageSequence: number; accepted: boolean; finished: boolean; stopping: boolean; maintenance: boolean;
 	output: OutputBuffer; toolStarts: Map<string, { summary: string; startTime: number }>; fast: boolean; thinking: string;
 }
 interface AgentState {
@@ -51,6 +51,7 @@ export default function (pi: ExtensionAPI) {
 	let viewedAgent: AgentState | undefined; let rootAgent: AgentState | undefined;
 	let agentAutocompleteInstalled = false; let gridCols = 3; let rootStartTime = 0; let hostBusy = false;
 	let autoSpawn = false; let autoSpawnLimit = DEFAULT_AUTO_SPAWN_LIMIT; let routingQueue: QueueItem[] = []; let drainingQueue = false;
+	let lifecycleGeneration = 0; let bulkCompactionActive = false;
 	const pendingDeliveries: AgentState[] = [];
 	/** The host's own tools, captured before this extension first narrowed them, so demote can give them back. */
 	let hostTools: string[] | undefined; let rootModelRestored = true;
@@ -377,7 +378,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		terminateRun(run);
 	}
-	function startAgent(state: AgentState, task: string, ctx: any, options: { record?: boolean } = {}): ActiveAgentRun {
+	function startAgent(state: AgentState, task: string, ctx: any, options: { record?: boolean; maintenance?: boolean } = {}): ActiveAgentRun {
 		state.status = "running"; state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); state.toolCount = 0; state.elapsed = 0; state.lastWork = "";
 		// Maintenance runs (compaction) must not enter the transcript as a task the agent was given.
 		if (options.record === false) state.task = "Compacting";
@@ -398,7 +399,7 @@ export default function (pi: ExtensionAPI) {
 		const childEnv = { ...process.env, [OPENAI_FAST_ENV]: fast ? "on" : "off" };
 		const child = spawn(process.env.PI_BIN || "pi", args, { stdio: ["pipe", "pipe", "pipe"], env: childEnv });
 		const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
-		const run: ActiveAgentRun = { child, transport, text: new TextTail(), stderrChunks: [], initialTask: task, tasks: task ? [task] : [], sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, output: new OutputBuffer(), toolStarts: new Map(), fast, thinking }; state.activeRun = run; updateWidget();
+		const run: ActiveAgentRun = { child, transport, text: new TextTail(), stderrChunks: [], initialTask: task, tasks: task ? [task] : [], sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, maintenance: options.maintenance === true, output: new OutputBuffer(), toolStarts: new Map(), fast, thinking }; state.activeRun = run; updateWidget();
 		let buffer = ""; const appendActivity = (kind: ActivityKind, value: unknown) => state.activity.append(kind, value);
 		const persistUsage = (kind: string, message: any, usage: any) => { if (!usage || typeof usage !== "object") return; state.tokens = addTokenCounts(state.tokens, tokenCountsFromUsage(usage)); pi.appendEntry("agent-team-usage", { sourceEventId: `${run.runId}:${kind}:${++run.usageSequence}`, usage, provider: message?.provider, model: message?.model }); pi.events.emit("agent-team:usage", { agent: state.name }); updateWidget(); };
 		const toolSummary = (event: any) => formatToolActivity(event.toolName, event.args ?? event.input ?? event.parameters);
@@ -503,6 +504,7 @@ export default function (pi: ExtensionAPI) {
 		if (state.status === "running") {
 			const run = state.activeRun;
 			if (!run || run.finished || run.stopping) throw new Error(`${displayName(state.name)} cannot be steered`);
+			if (!canSteerAgent(state.status, run.maintenance)) throw new Error(`${displayName(state.name)} is compacting`);
 			await run.transport.request({ type: "prompt", message: task, streamingBehavior: "steer" });
 			// Record it only once the child has accepted it. Without this the detail view — whose whole
 			// purpose is steering — shows no trace of what you just typed, and the card keeps advertising
@@ -577,7 +579,7 @@ export default function (pi: ExtensionAPI) {
 		// Without -c the child would open a blank session and compact nothing, while still
 		// leaving the instance looking as though it had a transcript.
 		if (!state.sessionFile) throw new Error(`${displayName(state.name)} has not run yet; there is nothing to compact`);
-		const run = startAgent(state, "", ctx, { record: false });
+		const run = startAgent(state, "", ctx, { record: false, maintenance: true });
 		try {
 			await run.transport.request({ type: "compact" });
 			finishRun(state, run);
@@ -596,14 +598,30 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 	const subagents = () => [...agentStates.values()].filter(state => state !== rootAgent);
-	async function compactAllSubagents(ctx: any) {
-		const compacted: string[] = []; const skipped: string[] = []; const failed: string[] = [];
-		for (const state of subagents()) {
-			if (!canCompactAgent(state.status, false, !!state.sessionFile)) { skipped.push(state.name); continue; }
-			try { await compactAgent(state.name, ctx); compacted.push(state.name); } catch { failed.push(state.name); }
-		}
-		const summary = [`compacted: ${compacted.join(", ") || "none"}`, `skipped: ${skipped.join(", ") || "none"}`, `failed: ${failed.join(", ") || "none"}`].join("\n");
-		ctx.ui.notify(summary, failed.length ? "warning" : "success");
+	function compactAllSubagents(ctx: any) {
+		if (bulkCompactionActive) return void ctx.ui.notify("Bulk subagent compaction is already running", "warning");
+		const skipped: string[] = []; const candidates = subagents().filter(state => {
+			if (canCompactAgent(state.status, false, !!state.sessionFile)) return true;
+			skipped.push(state.name); return false;
+		});
+		if (!candidates.length) return void ctx.ui.notify(`No eligible subagents to compact\nskipped: ${skipped.join(", ") || "none"}`, "info");
+		const generation = lifecycleGeneration;
+		bulkCompactionActive = true;
+		ctx.ui.notify(`Compacting ${candidates.map(state => state.name).join(", ")} in background`, "info");
+		void runConcurrent(candidates.map(state => async () => {
+			await compactAgent(state.name, ctx);
+			return state.name;
+		})).then(results => {
+			if (generation !== lifecycleGeneration) return;
+			const compacted = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+			const failed = results.flatMap((result, index) => result.status === "rejected" ? [candidates[index]!.name] : []);
+			for (const name of failed) ctx.ui.notify(`${displayName(name)} compaction failed`, "error");
+			ctx.ui.notify([`compacted: ${compacted.join(", ") || "none"}`, `skipped: ${skipped.join(", ") || "none"}`, `failed: ${failed.join(", ") || "none"}`].join("\n"), failed.length ? "warning" : "success");
+		}).catch(error => {
+			if (generation === lifecycleGeneration) ctx.ui.notify(`Bulk compaction: ${String(error)}`, "error");
+		}).finally(() => {
+			if (generation === lifecycleGeneration) bulkCompactionActive = false;
+		});
 	}
 	async function clearAllSubagents(ctx: any) {
 		const candidates = subagents().filter(state => canClearAgent(state.status, false));
@@ -741,7 +759,7 @@ export default function (pi: ExtensionAPI) {
 			if (command === "clear-all-sub") { if (rest.length) return void ctx.ui.notify("Usage: /agents clear-all-sub", "error"); try { await clearAllSubagents(ctx); } catch (error) { fail(error); } return; }
 			if (command === "remove") { const state = stateFor(name); if (!state) return void ctx.ui.notify(`Unknown instance "${name}". Usage: /agents remove <name>`, "error"); try { removeAgent(state, ctx); } catch (error) { fail(error); } return; }
 			if (command === "compact") { if (!name) return void ctx.ui.notify("Usage: /agents compact <name>", "error"); try { await compactAgent(name, ctx); } catch (error) { fail(error); } return; }
-			if (command === "compact-all-sub") { if (rest.length) return void ctx.ui.notify("Usage: /agents compact-all-sub", "error"); try { await compactAllSubagents(ctx); } catch (error) { fail(error); } return; }
+			if (command === "compact-all-sub") { if (rest.length) return void ctx.ui.notify("Usage: /agents compact-all-sub", "error"); try { compactAllSubagents(ctx); } catch (error) { fail(error); } return; }
 			if (command === "promote") {
 				let state = stateForPromotion(name); let created = false;
 				if (!state) {
@@ -899,8 +917,9 @@ export default function (pi: ExtensionAPI) {
 		syncStatus(ctx);
 		await drainRoutingQueue(ctx);
 	});
-	pi.on("session_shutdown", () => { for (const state of agentStates.values()) { clearInterval(state.timer); state.timer = undefined; if (state.activeRun) terminateRun(state.activeRun); } });
+	pi.on("session_shutdown", () => { lifecycleGeneration++; bulkCompactionActive = false; for (const state of agentStates.values()) { clearInterval(state.timer); state.timer = undefined; if (state.activeRun) terminateRun(state.activeRun); } });
 	pi.on("session_start", async (_event, ctx) => {
+		lifecycleGeneration++; bulkCompactionActive = false;
 		if (!agentAutocompleteInstalled) {
 			ctx.ui.addAutocompleteProvider(current => ({
 				async getSuggestions(lines, cursorLine, cursorCol, options) {

@@ -35,6 +35,17 @@ export function canCompactAgent(status: string, isRoot: boolean, hasSession: boo
 	return hasSession && canClearAgent(status, isRoot);
 }
 
+export function canSteerAgent(status: string, maintenance: boolean): boolean {
+	return status === "running" && !maintenance;
+}
+
+/** Start every job before awaiting any result. */
+export function runConcurrent<T>(tasks: readonly (() => Promise<T>)[]): Promise<PromiseSettledResult<T>[]> {
+	return Promise.allSettled(tasks.map(task => {
+		try { return task(); } catch (error) { return Promise.reject(error); }
+	}));
+}
+
 /** Only an active child has a process that can be interrupted. */
 export function canInterruptAgent(status: string, isRoot: boolean): boolean {
 	return !isRoot && status === "running";
