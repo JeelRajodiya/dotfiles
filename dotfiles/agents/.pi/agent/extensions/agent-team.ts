@@ -42,6 +42,30 @@ const displayName = (name: string) => name.split("-").map(w => w.charAt(0).toUpp
 const key = (name: string) => name.toLowerCase();
 const normalizeName = (name: string) => name.trim().toLowerCase().replace(/\s+/g, "-");
 
+/** Attach only static menu keys. Never derive a key from agent names, models, teams, tasks, or queue IDs. */
+export function annotateAgentCompletion(prefix: string, items: AutocompleteItem[]): AutocompleteItem[] {
+	const trailing = /\s$/.test(prefix); const parts = prefix.trim() ? prefix.trim().split(/\s+/) : [];
+	const command = parts[0];
+	const keyFor = (item: AutocompleteItem): string | undefined => {
+		if (!command || parts.length === 1 && !trailing) {
+			return new Set(["add", "tell", "interrupt", "clear", "clear-all-sub", "remove", "compact", "compact-all-sub", "promote", "list", "model", "fast", "auto-spawn", "queue", AGENT_VIEW_COMMAND, "grid", "team", "help", "demote", "exit"]).has(item.value)
+				? `agents.command.${item.value}` : undefined;
+		}
+		if (command === "add" && item.value === "add custom") return "agents.add.custom";
+		if (command === "fast" && /\s(?:on|off)$/.test(item.value)) return `agents.fast.${item.label}`;
+		if (command === "auto-spawn" && /\s(?:on|off|limit)$/.test(item.value)) return `agents.auto-spawn.${item.label}`;
+		if (command === "queue" && /\s(?:edit|remove)$/.test(item.value)) return `agents.queue.${item.label}`;
+		if (command === "model" && /\sinherit$/.test(item.value)) return "agents.model.inherit";
+		if (command === "grid" && /^[1-6]$/.test(item.label)) return `agents.grid.${item.label}`;
+		if (command === "team" && /\soff$/.test(item.value)) return "agents.team.off";
+		return undefined;
+	};
+	return items.map(item => {
+		const usageKey = keyFor(item);
+		return usageKey ? { ...item, usageKey } : item;
+	});
+}
+
 export default function (pi: ExtensionAPI) {
 	const agentStates = new Map<string, AgentState>();
 	const agentModelOverrides = new Map<string, string>();
@@ -929,7 +953,7 @@ export default function (pi: ExtensionAPI) {
 					const prefix = (lines[cursorLine] ?? "").slice(0, cursorCol).match(/^\/agents[ \t]+([\s\S]*)$/)?.[1];
 					if (!options.force || prefix === undefined) return current.getSuggestions(lines, cursorLine, cursorCol, options);
 					const items = getAgentArgumentCompletions(prefix);
-					return items ? { items, prefix } : current.getSuggestions(lines, cursorLine, cursorCol, options);
+					return items ? { items: annotateAgentCompletion(prefix, items), prefix } : current.getSuggestions(lines, cursorLine, cursorCol, options);
 				},
 				applyCompletion(lines, cursorLine, cursorCol, item, prefix) { return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix); },
 				shouldTriggerFileCompletion(lines, cursorLine, cursorCol) { return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true; },

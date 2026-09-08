@@ -24,10 +24,12 @@ import {
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadSessions, parseSessionLines, type SessionRecord } from "./lib/session-cost.ts";
+import { completionEventForItem, completionUsageKey, MAX_COMPLETION_USAGE_KEYS, parseUsageEvents, rankCompletionItems, type UsageAutocompleteItem } from "./lib/completion-usage.ts";
 
 const usageFile = join(getAgentDir(), "usage-ranking.jsonl");
 const monthlyModelUsage = new Map<string, number>();
 const commandUsage = new Map<string, number>();
+const completionUsage = new Map<string, number>();
 
 const increment = (counts: Map<string, number>, key: string, amount = 1) =>
 	counts.set(key, (counts.get(key) ?? 0) + amount);
@@ -82,15 +84,12 @@ function loadUsage() {
 	const stamp = usageFileStamp();
 	if (stamp && stamp === usageStamp) return;
 	commandUsage.clear();
+	completionUsage.clear();
 	mkdirSync(getAgentDir(), { recursive: true });
 	try {
-		for (const line of readFileSync(usageFile, "utf8").split("\n")) {
-			if (!line) continue;
-			try {
-				const event = JSON.parse(line);
-				if (event.type === "command" && isInMonths(event.timestamp)) increment(commandUsage, event.key);
-			} catch {}
-		}
+		const events = parseUsageEvents(readFileSync(usageFile, "utf8"), new Date(), timestamp => isInMonths(timestamp));
+		for (const [key, count] of events.commands) commandUsage.set(key, count);
+		for (const [key, count] of events.completions) completionUsage.set(key, count);
 	} catch {}
 	usageStamp = stamp;
 }
@@ -105,6 +104,15 @@ function recordCommand(key: string) {
 	// ponytail: append-only avoids cross-process lost updates; compact if this reaches megabytes.
 	appendFileSync(usageFile, `${JSON.stringify({ type: "command", key, timestamp: new Date().toISOString() })}\n`);
 	// Already counted in memory: adopt the new stamp so the next read is not a needless reparse.
+	usageStamp = usageFileStamp();
+}
+
+function recordCompletion(item: UsageAutocompleteItem) {
+	const event = completionEventForItem(item);
+	const key = completionUsageKey(item);
+	if (!event || !key || (!completionUsage.has(key) && completionUsage.size >= MAX_COMPLETION_USAGE_KEYS)) return;
+	increment(completionUsage, key);
+	appendFileSync(usageFile, `${event}\n`);
 	usageStamp = usageFileStamp();
 }
 
@@ -473,9 +481,13 @@ export default function (pi: ExtensionAPI) {
 					await ensureMonthlyUsage();
 					result.items = rank(result.items, monthlyModelUsage, item => item.value);
 				}
+				const completionQuery = result.prefix.trim().split(/\s+/).at(-1) ?? "";
+				result.items = rankCompletionItems(result.items as UsageAutocompleteItem[], completionQuery, completionUsage);
 				return result;
 			},
 			applyCompletion: (lines, line, col, item: AutocompleteItem, prefix) => {
+				// Only the optional static usageKey is persisted; never selected display/value text.
+				recordCompletion(item as UsageAutocompleteItem);
 				const result = current.applyCompletion(lines, line, col, item, prefix);
 				if (submitting) recordSubmission(commandFromText(result.lines.join("\n")));
 				const query = completedModelQuery(submitting, result.lines);
