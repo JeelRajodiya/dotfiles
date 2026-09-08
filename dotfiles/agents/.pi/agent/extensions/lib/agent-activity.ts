@@ -10,7 +10,7 @@
  */
 
 export type ActivityKind = "user" | "assistant" | "thought" | "tool-start" | "tool-done" | "tool-error";
-export interface ActivityEntry { kind: ActivityKind; text: string; startedAt?: number; finishedAt?: number }
+export interface ActivityEntry { kind: ActivityKind; text: string; toolCallId?: string; startedAt?: number; finishedAt?: number }
 
 const KINDS = new Set<string>(["user", "assistant", "thought", "tool-start", "tool-done", "tool-error"]);
 const LINE = /^(user|assistant|thought|tool-start|tool-done|tool-error):\s*([\s\S]*)$/i;
@@ -97,6 +97,28 @@ export class ActivityLog {
 		if (this.entries.length > this.maxEntries) this.entries.splice(0, this.entries.length - this.maxEntries);
 	}
 
+	/** Keep one row per identified tool call; missing IDs deliberately remain separate. */
+	startTool(toolCallId: string, value: unknown): void {
+		const text = cleanActivity(value);
+		if (!text) return;
+		this.entries.push({ kind: "tool-start", text: this.clamp(text), toolCallId });
+		if (this.entries.length > this.maxEntries) this.entries.splice(0, this.entries.length - this.maxEntries);
+	}
+
+	finishTool(toolCallId: string | undefined, kind: "tool-done" | "tool-error", value: unknown): void {
+		const text = cleanActivity(value);
+		if (!text) return;
+		const pending = toolCallId
+			? [...this.entries].reverse().find(entry => entry.kind === "tool-start" && entry.toolCallId === toolCallId)
+			: undefined;
+		if (pending) {
+			pending.kind = kind;
+			pending.text = this.clamp(text);
+			return;
+		}
+		this.append(kind, text);
+	}
+
 	startThought(now = Date.now()): void {
 		const last = this.entries.at(-1);
 		if (last?.kind === "thought" && !last.finishedAt) return;
@@ -144,7 +166,12 @@ export class ActivityLog {
 		const log = new ActivityLog(maxEntries, maxTextLength);
 		for (const line of serialized.split("\n")) {
 			const match = line.match(LINE);
-			if (match && KINDS.has(match[1].toLowerCase())) log.append(match[1].toLowerCase() as ActivityKind, match[2]);
+			if (!match || !KINDS.has(match[1].toLowerCase())) continue;
+			const kind = match[1].toLowerCase() as ActivityKind;
+			const [toolCallId, text] = match[2].split("\t", 2);
+			if (kind === "tool-start" && text && toolCallId) log.startTool(toolCallId, text);
+			else if ((kind === "tool-done" || kind === "tool-error") && text && toolCallId) log.finishTool(toolCallId, kind, text);
+			else log.append(kind, match[2]);
 		}
 		return log;
 	}

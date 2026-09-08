@@ -279,11 +279,22 @@ const shortActivityText = (value: unknown, max = 180) => {
 	const text = cleanActivityText(value); return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 };
 export function formatToolActivity(name: unknown, args: unknown): string {
+	const tool = cleanActivityText(name).toLowerCase();
 	const values = args && typeof args === "object" ? args as Record<string, unknown> : {};
+	const detail = (key: string) => values[key] === undefined ? "" : shortActivityText(values[key]);
+	const path = detail("path") || detail("file") || detail("file_path");
+	if (tool === "bash" || tool === "powershell") return detail("command") || tool;
+	if (tool === "read" || tool === "edit" || tool === "write") return `${tool[0]!.toUpperCase()}${tool.slice(1)}${path ? ` ${path}` : ""}`;
+	if (tool === "grep") return `Search${detail("pattern") ? ` ${detail("pattern")}` : ""}${path ? ` in ${path}` : ""}`;
+	if (tool === "find") return `Find${detail("pattern") ? ` ${detail("pattern")}` : ""}${path ? ` in ${path}` : ""}`;
+	if (tool === "ls") return `List${path ? ` ${path}` : ""}`;
 	const details = ["command", "path", "file", "pattern", "description", "query", "url", "agent", "task"]
 		.flatMap(key => values[key] === undefined ? [] : [shortActivityText(values[key])]);
-	return details.slice(0, 2).join(" · ") || cleanActivityText(name) || "tool";
+	return details.slice(0, 2).join(" · ") || tool || "tool";
 }
+
+const activityToolRecord = (toolCallId: unknown, text: string) =>
+	typeof toolCallId === "string" && toolCallId ? `${toolCallId}\t${text}` : text;
 
 /** Compact, safe timeline recovered from a child Pi JSONL session. */
 export function latestChildActivity(sessionFile: string, maxEntries = 24): string {
@@ -300,12 +311,12 @@ export function latestChildActivity(sessionFile: string, maxEntries = 24): strin
 				if (typeof message.content === "string" && message.content) entries.push(`assistant: ${shortActivityText(message.content)}`);
 				for (const part of Array.isArray(message.content) ? message.content : []) {
 					if (part?.type === "text" && part.text) entries.push(`assistant: ${shortActivityText(part.text)}`);
-					if (part?.type === "toolCall") { const summary = formatToolActivity(part.name, part.arguments); calls.set(part.id, { summary, timestamp }); entries.push(`tool-start: ${summary}`); }
+					if (part?.type === "toolCall") { const summary = formatToolActivity(part.name, part.arguments); if (typeof part.id === "string" && part.id) calls.set(part.id, { summary, timestamp }); entries.push(`tool-start: ${activityToolRecord(part.id, summary)}`); }
 				}
 			} else if (message.role === "toolResult") {
-				const call = calls.get(message.toolCallId); const elapsed = call?.timestamp && timestamp ? ` · ${Math.max(0, Math.round((timestamp - call.timestamp) / 1000))}s` : "";
+				const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : undefined; const call = toolCallId ? calls.get(toolCallId) : undefined; const elapsed = call?.timestamp && timestamp ? ` · ${Math.max(0, Math.round((timestamp - call.timestamp) / 1000))}s` : "";
 				const error = message.isError ? ` — ${shortActivityText(Array.isArray(message.content) ? message.content.find((part: any) => part?.type === "text")?.text : message.content, 96)}` : "";
-				entries.push(`${message.isError ? "tool-error" : "tool-done"}: ${(call?.summary ?? cleanActivityText(message.toolName)) || "tool"}${elapsed}${error}`);
+				entries.push(`${message.isError ? "tool-error" : "tool-done"}: ${activityToolRecord(toolCallId, `${call?.summary ?? formatToolActivity(message.toolName, {})}${elapsed}${error}`)}`);
 			}
 		} catch {}
 	}
@@ -371,12 +382,12 @@ export function readChildSession(sessionFile: string, maxEntries = 24): ChildSes
 				if (typeof message.content === "string" && message.content) activity.push(`assistant: ${shortActivityText(message.content)}`);
 				for (const part of Array.isArray(message.content) ? message.content : []) {
 					if (part?.type === "text" && part.text) activity.push(`assistant: ${shortActivityText(part.text)}`);
-					if (part?.type === "toolCall") { const summary = formatToolActivity(part.name, part.arguments); calls.set(part.id, { summary, timestamp }); activity.push(`tool-start: ${summary}`); }
+					if (part?.type === "toolCall") { const summary = formatToolActivity(part.name, part.arguments); if (typeof part.id === "string" && part.id) calls.set(part.id, { summary, timestamp }); activity.push(`tool-start: ${activityToolRecord(part.id, summary)}`); }
 				}
 			} else if (message.role === "toolResult") {
-				const call = calls.get(message.toolCallId); const elapsed = call?.timestamp && timestamp ? ` · ${Math.max(0, Math.round((timestamp - call.timestamp) / 1000))}s` : "";
+				const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : undefined; const call = toolCallId ? calls.get(toolCallId) : undefined; const elapsed = call?.timestamp && timestamp ? ` · ${Math.max(0, Math.round((timestamp - call.timestamp) / 1000))}s` : "";
 				const error = message.isError ? ` — ${shortActivityText(Array.isArray(message.content) ? message.content.find((part: any) => part?.type === "text")?.text : message.content, 96)}` : "";
-				activity.push(`${message.isError ? "tool-error" : "tool-done"}: ${(call?.summary ?? cleanActivityText(message.toolName)) || "tool"}${elapsed}${error}`);
+				activity.push(`${message.isError ? "tool-error" : "tool-done"}: ${activityToolRecord(toolCallId, `${call?.summary ?? formatToolActivity(message.toolName, {})}${elapsed}${error}`)}`);
 			}
 		} catch {}
 	}

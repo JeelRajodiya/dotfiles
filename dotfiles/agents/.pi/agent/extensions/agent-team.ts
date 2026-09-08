@@ -418,19 +418,22 @@ export default function (pi: ExtensionAPI) {
 		const onThinkingEnd = (event: any) => state.activity.finishThought(event.assistantMessageEvent.content);
 		const onToolStart = (event: any) => {
 			state.toolCount++;
-			const id = event.toolCallId ?? event.id ?? `${event.toolName}:${state.toolCount}`;
-			run.toolStarts.set(id, { summary: toolSummary(event), startTime: Date.now() });
-			appendActivity("tool-start", run.toolStarts.get(id)!.summary);
+			const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : undefined;
+			const summary = toolSummary(event);
+			if (toolCallId) {
+				run.toolStarts.set(toolCallId, { summary, startTime: Date.now() });
+				state.activity.startTool(toolCallId, summary);
+			} else appendActivity("tool-start", summary);
 		};
 		const onToolEnd = (event: any) => {
-			const id = event.toolCallId ?? event.id;
-			const started = id ? run.toolStarts.get(id) : undefined;
+			const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : undefined;
+			const started = toolCallId ? run.toolStarts.get(toolCallId) : undefined;
 			// Drop the pending entry: a long run makes thousands of calls and none are needed twice.
-			if (id) run.toolStarts.delete(id);
+			if (toolCallId) run.toolStarts.delete(toolCallId);
 			const elapsed = started ? ` · ${Math.max(0, Math.round((Date.now() - started.startTime) / 1000))}s` : "";
 			const error = toolError(event);
 			const summary = started?.summary ?? toolSummary(event);
-			appendActivity(error ? "tool-error" : "tool-done", `${summary}${elapsed}${error ? ` — ${String(error).slice(0, 96)}` : ""}`);
+			state.activity.finishTool(toolCallId, error ? "tool-error" : "tool-done", `${summary}${elapsed}${error ? ` — ${String(error).slice(0, 96)}` : ""}`);
 		};
 		const onMessageEnd = (event: any) => {
 			// A child that answers without streaming still has its text on the final message.

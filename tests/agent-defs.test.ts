@@ -1,10 +1,13 @@
 // Run: node tests/agent-defs.test.ts
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
-import { canClearAgent, canCompactAgent, canSteerAgent, formatAgentModelLabel, formatToolActivity, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, resultDeliveryStatus, rootTools, runConcurrent, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
+import { canClearAgent, canCompactAgent, canSteerAgent, formatAgentModelLabel, formatToolActivity, latestChildActivity, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, readChildSession, resultDeliveryStatus, rootTools, runConcurrent, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
+import { ActivityLog } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-activity.ts";
 
 assert.deepEqual(parseTeams("flat:\n  - planner\n  - builder\nrooted:\n  main: understand\n  subs:\n    - iterate\n"), {
 	flat: { members: ["planner", "builder"] },
@@ -107,8 +110,47 @@ const detail = renderDetail({
 assert.match(detail, /gpt-5.6-sol \(fast\)/);
 
 assert.equal(formatToolActivity("bash", { command: "git status --short" }), "git status --short");
-assert.equal(formatToolActivity("read", { path: "src/main.ts" }), "src/main.ts");
+assert.equal(formatToolActivity("read", { path: "src/main.ts" }), "Read src/main.ts");
+assert.equal(formatToolActivity("edit", { path: "src/main.ts" }), "Edit src/main.ts");
+assert.equal(formatToolActivity("write", { path: "src/main.ts" }), "Write src/main.ts");
+assert.equal(formatToolActivity("grep", { pattern: "TODO", path: "src" }), "Search TODO in src");
 assert.equal(formatToolActivity("bash", {}), "bash");
+
+const liveActivity = new ActivityLog();
+liveActivity.startTool("read-1", "Read src/main.ts");
+liveActivity.startTool("read-2", "Read src/main.ts");
+liveActivity.finishTool("read-2", "tool-done", "Read src/main.ts · 0s");
+liveActivity.finishTool("read-1", "tool-error", "Read src/main.ts · 1s — denied");
+liveActivity.startTool("pending", "Edit src/main.ts");
+liveActivity.finishTool(undefined, "tool-done", "Write src/main.ts · 0s");
+assert.deepEqual(liveActivity.list().map(({ kind, text }) => [kind, text]), [
+	["tool-error", "Read src/main.ts · 1s — denied"],
+	["tool-done", "Read src/main.ts · 0s"],
+	["tool-start", "Edit src/main.ts"],
+	["tool-done", "Write src/main.ts · 0s"],
+], "identified concurrent calls collapse in their original order; pending and missing-ID results stay distinct");
+const cappedActivity = new ActivityLog();
+for (let index = 0; index < 25; index++) cappedActivity.startTool(`tool-${index}`, `Read ${index}`);
+assert.equal(cappedActivity.list().length, 24, "one-row tool tracking retains the activity cap");
+
+const sessionDir = mkdtempSync(join(tmpdir(), "agent-activity-"));
+const childSession = join(sessionDir, "child.jsonl");
+writeFileSync(childSession, [
+	JSON.stringify({ type: "message", timestamp: "2026-01-01T00:00:00.000Z", message: { role: "assistant", content: [
+		{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "src/main.ts" } },
+		{ type: "toolCall", id: "read-2", name: "read", arguments: { path: "src/main.ts" } },
+	] } }),
+	JSON.stringify({ type: "message", timestamp: "2026-01-01T00:00:01.000Z", message: { role: "toolResult", toolCallId: "read-2", toolName: "read", content: [], isError: false } }),
+	JSON.stringify({ type: "message", timestamp: "2026-01-01T00:00:02.000Z", message: { role: "toolResult", toolCallId: "missing", toolName: "write", content: [{ type: "text", text: "denied" }], isError: true } }),
+].join("\n"));
+const recovered = ActivityLog.parse(readChildSession(childSession).activity).list();
+assert.deepEqual(recovered.map(({ kind, text }) => [kind, text]), [
+	["tool-start", "Read src/main.ts"],
+	["tool-done", "Read src/main.ts · 1s"],
+	["tool-error", "Write — denied"],
+], "recovery collapses matched calls, preserves pending starts, and retains unmatched failures");
+assert.deepEqual(ActivityLog.parse(latestChildActivity(childSession)).list().map(({ kind, text }) => [kind, text]), recovered.map(({ kind, text }) => [kind, text]));
+rmSync(sessionDir, { recursive: true, force: true });
 const compactDetail = renderDetail({
 	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "done",
 	toolCount: 0, elapsed: 0, contextTokens: 0, contextWindow: 0, tokens: { input: 0, output: 0 }, model: "test/model",
