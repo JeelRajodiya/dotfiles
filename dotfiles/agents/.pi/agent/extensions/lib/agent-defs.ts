@@ -6,6 +6,7 @@ export interface AgentDef {
 	name: string;
 	description: string;
 	model?: string;
+	fast?: boolean;
 	tools: string;
 	systemPrompt: string;
 	file: string;
@@ -46,6 +47,7 @@ export function parseAgentMarkdown(raw: string, file: string): AgentDef | null {
 		name: frontmatter.name,
 		description: frontmatter.description || "",
 		model: frontmatter.model,
+		fast: frontmatter.fast === "true" ? true : frontmatter.fast === "false" ? false : undefined,
 		tools: frontmatter.tools || DEFAULT_TOOLS,
 		systemPrompt: match[2].trim(),
 		file,

@@ -1,3 +1,10 @@
+default:
+  main: orchestrator
+  subs:
+    - understand
+    - iterate
+    - reviewer
+
 plan-build:
   - planner
   - builder

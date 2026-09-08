@@ -10,7 +10,7 @@ import {
 	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, canClearAgent, canInterruptAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
 	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, latestChildActivity, readChildSession,
 	OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent, shouldIgnoreAgentRunEvent,
-	restoreWaitingAgents, rootTools, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
+	restoreWaitingAgents, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
 	terminateChild, type AgentCompletionStatus, type TokenCounts,
 } from "./agent-team-helpers.ts";
 import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity.ts";
@@ -33,6 +33,7 @@ type SavedAgentFastOverrides = { overrides?: Record<string, boolean> };
 type LegacyTeamMode = { team?: string | null };
 
 const TEAM_TOOLS = ["dispatch_agent", "interrupt_agent", "set_agent_model"];
+const DEFAULT_TEAM = "default";
 const MAX_KEPT_SESSIONS = 20;
 const displayName = (name: string) => name.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 const key = (name: string) => name.toLowerCase();
@@ -73,7 +74,7 @@ export default function (pi: ExtensionAPI) {
 	const effectiveFast = (state: AgentState, ctx: any) => {
 		if (state === rootAgent) return hostFastMode(ctx);
 		const fast = agentFastOverrides.get(key(state.name));
-		return fast === undefined ? hostFastMode(ctx) : fast;
+		return fast ?? state.def.fast ?? hostFastMode(ctx);
 	};
 	const modelWindow = (model: string, ctx: any) => {
 		const slash = model.indexOf("/"); return slash > 0 ? ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))?.contextWindow ?? 0 : 0;
@@ -145,9 +146,15 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		const legacy = entries.filter((entry: any) => entry.type === "custom" && entry.customType === "agent-team-mode").pop()?.data as LegacyTeamMode | undefined;
-		if (legacy?.team) for (const member of teams[legacy.team]?.members ?? []) {
+		const team = teams[legacy?.team ?? DEFAULT_TEAM];
+		for (const member of team?.members ?? []) {
 			const def = definitionFor(member);
 			if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
+		}
+		if (team?.root) {
+			const def = definitionFor(team.root);
+			if (def && !agentStates.has(key(def.name))) agentStates.set(key(def.name), makeState(def, def.name, def.description));
+			rootAgent = stateFor(team.root);
 		}
 		persistTeam();
 	}
@@ -162,7 +169,7 @@ export default function (pi: ExtensionAPI) {
 	 * keep everything it started with — otherwise a plain session is left with dispatch_agent alone.
 	 */
 	function applyActiveTools() {
-		const restricted = rootAgent ? rootTools(hostTools ?? pi.getActiveTools(), TEAM_TOOLS) : agentStates.size ? TEAM_TOOLS : undefined;
+		const restricted = rootAgent ? TEAM_TOOLS : agentStates.size ? TEAM_TOOLS : undefined;
 		if (restricted) {
 			// ??= not .length: a host started with --no-tools has a legitimately empty toolset, and
 			// treating that as "not captured yet" would hand it the team tools back on demote.
@@ -734,7 +741,7 @@ export default function (pi: ExtensionAPI) {
 		if (rootAgent) {
 			rootAgent.task = event.prompt; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens;
 			const catalog = delegationCatalog([...agentStates.values()].filter(state => state !== rootAgent));
-			return { systemPrompt: `${event.systemPrompt}\n\n# Root agent identity: ${rootAgent.name} (${rootAgent.def.name})\nGoal: ${rootAgent.goal}\n\n${rootAgent.def.systemPrompt}\n\nYou are the visible host assistant. Work directly with your enabled tools. You may delegate focused work with dispatch_agent or directly stop a running child with interrupt_agent:\n${catalog}\n${delegationGuidance}\nNever dispatch yourself. Child results are private context; synthesize one coherent answer for the user.` };
+			return { systemPrompt: `${event.systemPrompt}\n\n# Root agent identity: ${rootAgent.name} (${rootAgent.def.name})\nGoal: ${rootAgent.goal}\n\n${rootAgent.def.systemPrompt}\n\nYou are the visible host assistant. Delegate focused work with dispatch_agent or directly stop a running child with interrupt_agent:\n${catalog}\n${delegationGuidance}\nNever dispatch yourself. Child results are private context; synthesize one coherent answer for the user.` };
 		}
 		// With no instances there is nobody to dispatch to: leave the host prompt alone rather than
 		// telling it to delegate to an empty catalogue.
