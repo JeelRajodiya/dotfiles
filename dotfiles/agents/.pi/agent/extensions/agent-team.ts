@@ -7,33 +7,36 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
-	addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, canClearAgent, canInterruptAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
+	appendTaskHistory, addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, decideRouting, canClearAgent, canInterruptAgent, canKillHostAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
 	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, latestChildActivity, readChildSession,
-	nextAgentName, OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, resultDeliveryStatus, restoreNextWaitingAgent, shouldIgnoreAgentRunEvent,
+	nextAgentName, OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, removeQueuedItem, resultDeliveryStatus, restoreNextWaitingAgent, shouldIgnoreAgentRunEvent, updateQueuedItem,
 	restoreWaitingAgents, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
-	terminateChild, type AgentCompletionStatus, type TokenCounts,
+	terminateChild, type AgentCompletionStatus, type AgentOrigin, type TaskHistoryEntry, type TokenCounts,
 } from "./agent-team-helpers.ts";
 import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity.ts";
 import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs.ts";
 import { FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } from "./lib/agent-render.ts";
 
 interface ActiveAgentRun {
-	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; text: TextTail; stderrChunks: string[]; initialTask: string;
+	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; text: TextTail; stderrChunks: string[]; initialTask: string; tasks: string[];
 	sessionFile: string; startTime: number; runId: string; usageSequence: number; accepted: boolean; finished: boolean; stopping: boolean;
 	output: OutputBuffer; toolStarts: Map<string, { summary: string; startTime: number }>; fast: boolean; thinking: string;
 }
 interface AgentState {
 	name: string; def: AgentDef; goal: string; status: AgentStatus; pendingOutcome?: AgentCompletionStatus; task: string;
 	toolCount: number; elapsed: number; lastWork: string; activity: ActivityLog; contextTokens: number; contextWindow: number; tokens: TokenCounts;
-	sessionFile: string | null; runCount: number; autoName: boolean; sessionKey: string; timer?: ReturnType<typeof setInterval>; activeRun?: ActiveAgentRun;
+	sessionFile: string | null; runCount: number; autoName: boolean; origin: AgentOrigin; history: TaskHistoryEntry[]; sessionKey: string; timer?: ReturnType<typeof setInterval>; activeRun?: ActiveAgentRun;
 }
-type SavedInstance = { name: string; type: string; goal: string; autoName?: boolean; sessionKey?: string };
+type SavedInstance = { name: string; type: string; goal: string; autoName?: boolean; origin?: AgentOrigin; sessionKey?: string };
 type SavedTeam = { instances: SavedInstance[]; root?: string };
 type SavedAgentFastOverrides = { overrides?: Record<string, boolean> };
+type QueueItem = { id: string; type: string; instance?: string; task: string; approved: boolean; createdAt: number };
+type SavedRouting = { autoSpawn?: boolean; limit?: number; queue?: QueueItem[] };
 type LegacyTeamMode = { team?: string | null };
 
-const TEAM_TOOLS = ["dispatch_agent", "interrupt_agent", "set_agent_model"];
+const TEAM_TOOLS = ["dispatch_agent", "route_agent", "spawn_agent", "kill_agent", "interrupt_agent", "set_agent_model"];
 const DEFAULT_TEAM = "default";
+const DEFAULT_AUTO_SPAWN_LIMIT = 3;
 const MAX_KEPT_SESSIONS = 20;
 const displayName = (name: string) => name.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 const key = (name: string) => name.toLowerCase();
@@ -47,6 +50,7 @@ export default function (pi: ExtensionAPI) {
 	let widgetCtx: any; let sessionDir = ""; let parentSessionId = "";
 	let viewedAgent: AgentState | undefined; let rootAgent: AgentState | undefined;
 	let agentAutocompleteInstalled = false; let gridCols = 3; let rootStartTime = 0; let hostBusy = false;
+	let autoSpawn = false; let autoSpawnLimit = DEFAULT_AUTO_SPAWN_LIMIT; let routingQueue: QueueItem[] = []; let drainingQueue = false;
 	const pendingDeliveries: AgentState[] = [];
 	/** The host's own tools, captured before this extension first narrowed them, so demote can give them back. */
 	let hostTools: string[] | undefined; let rootModelRestored = true;
@@ -118,7 +122,7 @@ export default function (pi: ExtensionAPI) {
 		if (!existsSync(path)) writeFileSync(path, JSON.stringify({ type: "session", version: 3, id: randomUUID(), timestamp: new Date().toISOString(), cwd }) + "\n");
 		return path;
 	}
-	function makeState(def: AgentDef, name: string, goal: string, autoName = false, rawSessionKey = name): AgentState {
+	function makeState(def: AgentDef, name: string, goal: string, autoName = false, rawSessionKey = name, origin: AgentOrigin = "user"): AgentState {
 		// childSessionPath rejects anything outside [A-Za-z0-9_-]; a definition named "code.review"
 		// would otherwise throw from session_start and take the whole extension down with it.
 		const sessionKey = rawSessionKey.toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "agent";
@@ -127,15 +131,15 @@ export default function (pi: ExtensionAPI) {
 		const restored = readChildSession(file);
 		return { name, def, goal, status: "idle", task: "", toolCount: 0, elapsed: 0, lastWork: "", activity: ActivityLog.parse(restored.activity),
 			contextTokens: restored.contextTokens ?? 0, contextWindow: modelWindow(def.model ?? parentModel(widgetCtx), widgetCtx), tokens: restored.tokens,
-			sessionFile: existsSync(file) ? file : null, runCount: 0, autoName, sessionKey };
+			sessionFile: existsSync(file) ? file : null, runCount: 0, autoName, origin, history: [], sessionKey };
 	}
 	function persistTeam() {
-		pi.appendEntry("agent-team-instances", { instances: [...agentStates.values()].map(state => ({ name: state.name, type: state.def.name, goal: state.goal, autoName: state.autoName, sessionKey: state.sessionKey })), root: rootAgent?.name });
+		pi.appendEntry("agent-team-instances", { instances: [...agentStates.values()].map(state => ({ name: state.name, type: state.def.name, goal: state.goal, autoName: state.autoName, origin: state.origin, sessionKey: state.sessionKey })), root: rootAgent?.name });
 	}
 	function addDefaultAgent(def: AgentDef) {
 		if ([...agentStates.values()].some(state => key(state.def.name) === key(def.name))) return;
 		const name = nextAutoName(def);
-		agentStates.set(key(name), makeState(def, name, def.description, true, randomUUID()));
+		agentStates.set(key(name), makeState(def, name, def.description, true, randomUUID(), "default"));
 	}
 	function restoreTeam(ctx: any) {
 		const entries = ctx.sessionManager.getEntries();
@@ -145,7 +149,9 @@ export default function (pi: ExtensionAPI) {
 		if (snapshot) {
 			for (const item of saved?.instances ?? []) {
 				const def = definitionFor(item.type);
-				if (def && /^[a-z0-9_-]+$/i.test(item.name) && !agentStates.has(key(item.name))) agentStates.set(key(item.name), makeState(def, item.name, item.goal || def.description, item.autoName === true, item.sessionKey && /^[a-z0-9_-]+$/i.test(item.sessionKey) ? item.sessionKey : item.name));
+				// Old snapshots predate ownership; treat them as user-owned, never host-killable.
+				const origin: AgentOrigin = item.origin === "host" || item.origin === "default" ? item.origin : "user";
+				if (def && /^[a-z0-9_-]+$/i.test(item.name) && !agentStates.has(key(item.name))) agentStates.set(key(item.name), makeState(def, item.name, item.goal || def.description, item.autoName === true, item.sessionKey && /^[a-z0-9_-]+$/i.test(item.sessionKey) ? item.sessionKey : item.name, origin));
 			}
 			rootAgent = saved?.root ? stateFor(saved.root) : undefined;
 			return;
@@ -167,6 +173,26 @@ export default function (pi: ExtensionAPI) {
 		sessionDir = join(getAgentDir(), "agent-team-sessions", encodeCwd(cwd));
 		if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true });
 		pruneSessionDirs(sessionDir, MAX_KEPT_SESSIONS); allAgentDefs = scanAgentDirs(cwd, getAgentDir()); teams = scanTeams(cwd, getAgentDir());
+	}
+	const validLimit = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 20 ? value : DEFAULT_AUTO_SPAWN_LIMIT;
+	const teamRoutingDefaults = (teamName?: string) => {
+		const team = teams[teamName ?? (rootAgent?.def.name === teams[DEFAULT_TEAM]?.root ? DEFAULT_TEAM : "")];
+		return { autoSpawn: team?.autoSpawn === true, limit: validLimit(team?.autoSpawnLimit) };
+	};
+	const persistRouting = () => pi.appendEntry("agent-team-routing", { autoSpawn, limit: autoSpawnLimit, queue: routingQueue });
+	function restoreRouting(ctx: any) {
+		const saved = (ctx.sessionManager.getEntries() as any[]).filter(entry => entry.type === "custom" && entry.customType === "agent-team-routing").pop()?.data as SavedRouting | undefined;
+		const defaults = teamRoutingDefaults();
+		autoSpawn = typeof saved?.autoSpawn === "boolean" ? saved.autoSpawn : defaults.autoSpawn;
+		autoSpawnLimit = validLimit(saved?.limit ?? defaults.limit);
+		routingQueue = (saved?.queue ?? []).filter((item): item is QueueItem => typeof item?.id === "string" && typeof item.type === "string" && typeof item.task === "string" && typeof item.approved === "boolean" && typeof item.createdAt === "number")
+			.map(item => ({ ...item, instance: typeof item.instance === "string" ? item.instance : undefined }));
+	}
+	function applyTeamRoutingDefaults(teamName?: string) {
+		const defaults = teamRoutingDefaults(teamName);
+		autoSpawn = defaults.autoSpawn;
+		autoSpawnLimit = defaults.limit;
+		persistRouting();
 	}
 	/**
 	 * Narrow the host's tools to match the current mode, and restore them when there is no mode.
@@ -333,6 +359,7 @@ export default function (pi: ExtensionAPI) {
 		// However the run ended, nothing is still thinking.
 		state.activity.closeOpenThoughts();
 		const outcome: AgentCompletionStatus = error ? "error" : "done";
+		for (const task of run.tasks) state.history = appendTaskHistory(state.history, task, outcome);
 		const queuedForDelivery = !run.stopping && run.accepted;
 		state.status = resultDeliveryStatus(outcome, queuedForDelivery && (hostBusy || widgetCtx?.isIdle?.() === false));
 		state.pendingOutcome = state.status === "waiting" ? outcome : undefined;
@@ -371,7 +398,7 @@ export default function (pi: ExtensionAPI) {
 		const childEnv = { ...process.env, [OPENAI_FAST_ENV]: fast ? "on" : "off" };
 		const child = spawn(process.env.PI_BIN || "pi", args, { stdio: ["pipe", "pipe", "pipe"], env: childEnv });
 		const transport = new AgentRpcTransport((line, callback) => child.stdin.write(line, callback));
-		const run: ActiveAgentRun = { child, transport, text: new TextTail(), stderrChunks: [], initialTask: task, sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, output: new OutputBuffer(), toolStarts: new Map(), fast, thinking }; state.activeRun = run; updateWidget();
+		const run: ActiveAgentRun = { child, transport, text: new TextTail(), stderrChunks: [], initialTask: task, tasks: task ? [task] : [], sessionFile: file, startTime, runId: randomUUID(), usageSequence: 0, accepted: false, finished: false, stopping: false, output: new OutputBuffer(), toolStarts: new Map(), fast, thinking }; state.activeRun = run; updateWidget();
 		let buffer = ""; const appendActivity = (kind: ActivityKind, value: unknown) => state.activity.append(kind, value);
 		const persistUsage = (kind: string, message: any, usage: any) => { if (!usage || typeof usage !== "object") return; state.tokens = addTokenCounts(state.tokens, tokenCountsFromUsage(usage)); pi.appendEntry("agent-team-usage", { sourceEventId: `${run.runId}:${kind}:${++run.usageSequence}`, usage, provider: message?.provider, model: message?.model }); pi.events.emit("agent-team:usage", { agent: state.name }); updateWidget(); };
 		const toolSummary = (event: any) => formatToolActivity(event.toolName, event.args ?? event.input ?? event.parameters);
@@ -480,10 +507,67 @@ export default function (pi: ExtensionAPI) {
 			// Record it only once the child has accepted it. Without this the detail view — whose whole
 			// purpose is steering — shows no trace of what you just typed, and the card keeps advertising
 			// the original task. It also stops the reply before and after the steer merging into one entry.
-			state.activity.append("user", task); state.task = task; updateWidget();
+			run.tasks.push(task); state.activity.append("user", task); state.task = task; updateWidget();
 			return { status: "steered" as const };
 		}
 		const run = startAgent(state, task, ctx); try { await run.transport.request({ type: "prompt", message: task }); run.accepted = true; return { status: "running" as const }; } catch (error) { const failure = new Error(`Unable to start ${displayName(state.name)}: ${error instanceof Error ? error.message : String(error)}`); finishRun(state, run, failure); throw failure; }
+	}
+	const predefinedDefinition = (type: string) => predefinedDefs().find(def => key(def.name) === key(type));
+	const hostAgentCount = () => [...agentStates.values()].filter(state => state.origin === "host").length;
+	const routingCandidates = () => [...agentStates.values()].filter(state => state !== rootAgent).map(state => ({ ...state, base: state.def.name }));
+	function enqueueRoutingTask(item: Omit<QueueItem, "id" | "createdAt">, ctx: any) {
+		const queued: QueueItem = { ...item, id: randomUUID(), createdAt: Date.now() };
+		routingQueue.push(queued); persistRouting();
+		ctx.ui.notify(`${displayName(item.type)} task queued (${routingQueue.length} waiting)`, "info");
+		return queued;
+	}
+	async function spawnHostAgent(type: string, task: string, approved: boolean, ctx: any) {
+		const def = predefinedDefinition(type);
+		if (!def) throw new Error(`Unknown predefined agent type "${type}"`);
+		if (key(def.name) === "iterate" && !approved) throw new Error("Iterate tasks require explicit user approval before dispatch or queueing");
+		if (!autoSpawn) throw new Error("Auto-spawn is off; enable it with /agents auto-spawn on");
+		if (hostAgentCount() >= autoSpawnLimit) throw new Error(`Auto-spawn limit (${autoSpawnLimit}) reached`);
+		// Shared auto-naming defines the base-1/base-2 policy; host spawning never supplies names.
+		const generated = nextAutoName(def);
+		const state = makeState(def, generated, def.description || `Work as ${displayName(def.name)}`, true, randomUUID(), "host");
+		agentStates.set(key(state.name), state); persistTeam(); applyActiveTools(); updateWidget(); syncStatus(ctx);
+		await submitAgent(state.name, task, ctx);
+		return state;
+	}
+	async function routeTask(type: string, task: string, relation: "related" | "new", approved: boolean, ctx: any, preferredInstance?: string, queueOnFailure = true) {
+		const def = predefinedDefinition(type);
+		if (!def) throw new Error(`Unknown predefined agent type "${type}"`);
+		if (key(def.name) === "iterate" && !approved) throw new Error("Iterate tasks require explicit user approval before dispatch or queueing");
+		const decision = decideRouting(routingCandidates(), def.name, relation, preferredInstance, autoSpawn, hostAgentCount(), autoSpawnLimit);
+		if (decision.action === "related-unavailable") throw new Error("A related follow-up requires the named running specialist");
+		if (decision.action === "steer" || decision.action === "reuse") { const state = stateFor(decision.agent)!; return { status: (await submitAgent(state.name, task, ctx)).status, state }; }
+		if (decision.action === "spawn") return { status: "spawned" as const, state: await spawnHostAgent(def.name, task, approved, ctx) };
+		if (!queueOnFailure) return undefined;
+		return { status: "queued" as const, queue: enqueueRoutingTask({ type: def.name, instance: preferredInstance, task, approved }, ctx) };
+	}
+	async function drainRoutingQueue(ctx: any) {
+		if (drainingQueue || !ctx.isIdle()) return;
+		drainingQueue = true;
+		try {
+			for (let index = 0; index < routingQueue.length; index++) {
+				const item = routingQueue[index];
+				try {
+					const routed = await routeTask(item.type, item.task, "new", item.approved, ctx, item.instance, false);
+					if (!routed) continue;
+					routingQueue.splice(index, 1); persistRouting();
+					ctx.ui.notify(`${displayName(item.type)} queued task started`, "success");
+					return;
+				} catch (error) {
+					ctx.ui.notify(`Queued ${displayName(item.type)} task retained: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				}
+			}
+		} finally { drainingQueue = false; }
+	}
+	function killHostAgent(name: string, ctx: any) {
+		const state = stateFor(name);
+		if (!state) throw new Error(`Unknown dynamic instance "${name}"`);
+		if (!canKillHostAgent(state)) throw new Error("Only idle host-spawned agents can be killed");
+		removeAgent(state, ctx);
 	}
 	async function compactAgent(name: string, ctx: any) {
 		const state = stateFor(name);
@@ -517,10 +601,15 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme) { const task = (args as any).task || ""; return new Text(theme.fg("toolTitle", theme.bold("dispatch_agent ")) + theme.fg("accent", (args as any).agent || "?") + theme.fg("dim", ` — ${task.slice(0, 60)}`), 0, 0); },
 		renderResult(result, _options, theme) { const details = result.details as any; return new Text(theme.fg("accent", `● ${details?.agent || "agent"}`) + theme.fg("dim", details?.status === "steered" ? " steering accepted" : " working..."), 0, 0); },
 	});
+	pi.registerTool({ name: "route_agent", label: "Route Agent", description: "Route a task to a predefined specialist. relation=related steers only the named running instance; relation=new never steers busy work and may reuse, spawn, or queue.", parameters: Type.Object({ type: Type.String({ description: "Predefined base agent type; custom is not allowed" }), task: Type.String({ description: "Focused task" }), relation: Type.String({ description: "related or new" }), approved: Type.Boolean({ description: "True only after explicit user approval for Iterate work" }), preferredInstance: Type.Optional(Type.String({ description: "Relevant instance; required for related follow-ups" })) }),
+		async execute(_id, params, _signal, _update, ctx) { const input = params as { type: string; task: string; relation: "related" | "new"; approved: boolean; preferredInstance?: string }; if (input.relation !== "related" && input.relation !== "new") throw new Error("relation must be related or new"); const routed = await routeTask(input.type, input.task, input.relation, input.approved, ctx, input.preferredInstance); const agent = (routed as any).state?.name; return { content: [{ type: "text", text: routed.status === "queued" ? `${displayName(input.type)} task queued.` : `${displayName(agent)} ${routed.status}.` }], details: routed.status === "queued" ? { status: routed.status, queueId: (routed as any).queue.id } : { status: routed.status, agent } }; },
+	});
+	pi.registerTool({ name: "spawn_agent", label: "Spawn Agent", description: "Spawn a host-owned predefined specialist when auto-spawn is enabled. Never accepts custom types or prompts.", parameters: Type.Object({ type: Type.String(), task: Type.String(), approved: Type.Boolean({ description: "True only after explicit user approval for Iterate work" }) }), async execute(_id, params, _signal, _update, ctx) { const input = params as { type: string; task: string; approved: boolean }; const state = await spawnHostAgent(input.type, input.task, input.approved, ctx); return { content: [{ type: "text", text: `${displayName(state.name)} spawned.` }], details: { agent: state.name } }; } });
+	pi.registerTool({ name: "kill_agent", label: "Kill Agent", description: "Remove an idle host-spawned child. Default and user-created agents cannot be killed.", parameters: Type.Object({ agent: Type.String() }), async execute(_id, params, _signal, _update, ctx) { const state = killHostAgent((params as { agent: string }).agent, ctx); return { content: [{ type: "text", text: `${displayName(state.name)} removed.` }], details: { agent: state.name } }; } });
 	pi.registerTool({ name: "interrupt_agent", label: "Interrupt Agent", description: "Immediately terminate a running child agent without sending it a prompt.", parameters: Type.Object({ agent: Type.String({ description: "Running child instance name" }) }), async execute(_id, params) { const state = interruptAgent((params as { agent: string }).agent); return { content: [{ type: "text", text: `${displayName(state.name)} interrupted.` }], details: { agent: state.name, status: state.status } }; } });
 	pi.registerTool({ name: "set_agent_model", label: "Set Agent Model", description: "Set a session model for a named dynamic instance.", parameters: Type.Object({ agent: Type.String(), model: Type.String() }), async execute(_id, params, _signal, _update, ctx) { const { agent, model } = params as { agent: string; model: string }; const state = stateFor(agent); if (!state) throw new Error(`Unknown dynamic instance "${agent}"`); if (state === rootAgent) throw new Error("Change the root model with /agents model <name> <model|inherit> when the host is idle"); return { content: [{ type: "text", text: `${state.name}: ${setInstanceModel(state, model, ctx)}` }], details: { agent: state.name } }; } });
 
-	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | interrupt <agent> | clear <subagent-name> | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | fast <name> [on|off] | view <name> | exit | grid <1-6> | team <team-name|off>";
+	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | interrupt <agent> | clear <subagent-name> | remove <name> | compact <name> | promote <instance|base> | demote | list | model <name> [model|inherit] | fast <name> [on|off] | auto-spawn <on|off|limit N> | queue [edit <id> <task|target> ...|remove <id>] | view <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
 	const teamSnapshot = (teamName: string | undefined): SavedTeam => {
@@ -546,7 +635,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		pi.appendEntry("agent-team-model-overrides", { overrides: {} });
 		pi.appendEntry("agent-team-fast-overrides", { overrides: {} });
-		persistTeam(); applyActiveTools();
+		persistTeam(); applyTeamRoutingDefaults(teamName); applyActiveTools();
 		if (team?.root) {
 			const def = definitionFor(team.root);
 			if (def) addDefaultAgent(def);
@@ -562,7 +651,7 @@ export default function (pi: ExtensionAPI) {
 			const matches = choices.filter(value => value.toLowerCase().startsWith(current.toLowerCase())).map(value => ({ value: `${base}${value}`, label: value }));
 			return matches.length ? matches : null;
 		};
-		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "interrupt", "clear", "remove", "compact", "promote", "list", "model", "fast", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
+		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "interrupt", "clear", "remove", "compact", "promote", "list", "model", "fast", "auto-spawn", "queue", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
 		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...predefinedDefs().map(def => def.name), "custom"], "add ")?.map(item => item.label === "custom" ? { ...item, label: "Custom…" } : item) ?? null;
 		if (command === "tell" && shouldCompleteTellTarget(parts, trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "waiting").map(state => state.name), "tell ");
 		if (command === "interrupt" && (parts.length === 1 && trailing || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => canInterruptAgent(state.status, state === rootAgent)).map(state => state.name), "interrupt ");
@@ -571,6 +660,8 @@ export default function (pi: ExtensionAPI) {
 			return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running" && state.status !== "waiting").map(state => state.name), "fast ");
 		}
 		if (command === "fast" && parts.length === 2 && trailing || command === "fast" && parts.length === 3 && !trailing) return values(["on", "off"], `fast ${parts[1]} `);
+		if (command === "auto-spawn" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(["on", "off", "limit"], "auto-spawn ");
+		if (command === "queue" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(["edit", "remove"], "queue ");
 		if (command === "remove" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running").map(state => state.name), "remove ");
 		if (command === "compact" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent).map(state => state.name), "compact ");
 		if (command === "promote" && (parts.length === 1 || parts.length === 2 && !trailing)) {
@@ -641,6 +732,23 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			if (command === "demote") { if (rest.length) return void ctx.ui.notify("Usage: /agents demote", "error"); try { await demote(ctx); } catch (error) { fail(error); } return; }
+			if (command === "auto-spawn") {
+				const [mode, value] = rest;
+				if (mode === "on" && rest.length === 1) autoSpawn = true;
+				else if (mode === "off" && rest.length === 1) autoSpawn = false;
+				else if (mode === "limit" && rest.length === 2 && /^\d+$/.test(value || "") && Number(value) >= 1 && Number(value) <= 20) autoSpawnLimit = Number(value);
+				else return void ctx.ui.notify("Usage: /agents auto-spawn <on|off|limit N>", "error");
+				persistRouting(); ctx.ui.notify(`Auto-spawn ${autoSpawn ? "on" : "off"}; limit ${autoSpawnLimit}`, "info"); return;
+			}
+			if (command === "queue") {
+				const [action, id, field, ...value] = rest;
+				if (!action) return void ctx.ui.notify(routingQueue.map(item => `${item.id} · ${item.type}${item.instance ? `/${item.instance}` : ""} · ${item.approved ? "approved" : "unapproved"} · ${item.task}`).join("\n") || "Queue is empty", "info");
+				const item = routingQueue.find(candidate => candidate.id === id);
+				if (action === "remove" && item && rest.length === 2) { routingQueue = removeQueuedItem(routingQueue, item.id)!; persistRouting(); ctx.ui.notify("Queued task removed", "success"); return; }
+				if (action === "edit" && item && field === "task" && value.length) { routingQueue = updateQueuedItem(routingQueue, item.id, candidate => ({ ...candidate, task: value.join(" ") }))!; persistRouting(); ctx.ui.notify("Queued task updated", "success"); return; }
+				if (action === "edit" && item && field === "target" && value.length <= 2) { const def = predefinedDefinition(value[0] || ""); if (!def) return void ctx.ui.notify("Queue target must be a predefined base type", "error"); routingQueue = updateQueuedItem(routingQueue, item.id, candidate => ({ ...candidate, type: def.name, instance: value[1] }))!; persistRouting(); ctx.ui.notify("Queued target updated", "success"); return; }
+				return void ctx.ui.notify("Usage: /agents queue [edit <id> task <text>|edit <id> target <type> [instance]|remove <id>]", "error");
+			}
 			if (command === "fast") {
 				if (rest.length > 2) return void ctx.ui.notify("Usage: /agents fast <name> [on|off]", "error");
 				const [instance, rawMode] = rest; const state = stateFor(instance || "");
@@ -672,10 +780,12 @@ export default function (pi: ExtensionAPI) {
 					const choice = await ctx.ui.select("Switch team session?", ["start fresh", "fork current session"]);
 					if (!choice) return;
 					const snapshot = teamSnapshot(selected);
-					const seedTargetSession = async (sessionManager: any) => {
+						const seedTargetSession = async (sessionManager: any) => {
 						sessionManager.appendCustomEntry("agent-team-instances", snapshot);
 						sessionManager.appendCustomEntry("agent-team-model-overrides", { overrides: {} });
 						sessionManager.appendCustomEntry("agent-team-fast-overrides", { overrides: {} });
+						const defaults = teamRoutingDefaults(selected);
+						sessionManager.appendCustomEntry("agent-team-routing", { autoSpawn: defaults.autoSpawn, limit: defaults.limit, queue: routingQueue });
 					};
 					const newTargetSession = () => ctx.newSession({ parentSession: ctx.sessionManager.getSessionFile(), setup: seedTargetSession, withSession: async replacementCtx => {
 						await replacementCtx.reload();
@@ -707,11 +817,13 @@ export default function (pi: ExtensionAPI) {
 	const promptSummary = (value: string, limit: number) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, limit);
 	const delegationCatalog = (states: AgentState[]) => {
 		const shown = states.slice(0, 20).map(state => {
-			const name = promptSummary(state.name, 64); const type = promptSummary(state.def.name, 64); const goal = promptSummary(state.goal, 180);
-			const task = promptSummary(state.task, 140);
+			const name = promptSummary(state.name, 64); const type = promptSummary(state.def.name, 64); const capability = promptSummary(state.def.description || state.goal, 180);
+			const limitations = promptSummary(state.def.limitations || "No additional limits declared.", 140); const tools = promptSummary(state.def.tools, 140);
+			const task = promptSummary(state.task, 140); const history = state.history.slice(-3).map(entry => `${entry.outcome}:${promptSummary(entry.task, 96)}`).join(" | ") || "(none)";
+			const model = promptSummary(effectiveModel(state, widgetCtx), 96); const fast = effectiveFast(state, widgetCtx) ? "on" : "off";
 			const detail = state.status === "running" ? `; current task: ${task || "working"}; elapsed: ${Math.round(state.elapsed / 1000)}s`
 				: (state.status === "done" || state.status === "error") && task && state.task === task ? `; last task: ${task}` : "";
-			return `- name: ${name}; base type: ${type}; goal: ${goal}; status: ${state.status}${detail}`;
+			return `- name: ${name}; base type: ${type}; capability: ${capability}; limitations: ${limitations}; model: ${model}; fast: ${fast}; tools: ${tools}; status: ${state.status}; recent completed tasks: ${history}${detail}`;
 		});
 		if (states.length > shown.length) shown.push(`(${states.length - shown.length} additional instances omitted to keep this catalog bounded.)`);
 		return shown.join("\n") || "(none)";
@@ -749,7 +861,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_end", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("tool_execution_start", (event, ctx) => { if (rootAgent) { rootAgent.toolCount++; rootAgent.task = `Using ${event.toolName}`; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("tool_execution_end", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
-	pi.on("agent_settled", (_event, ctx) => {
+	pi.on("agent_settled", async (_event, ctx) => {
 		// isIdle is guaranteed here unless another run was started by an extension.
 		// In that case retain returning cards until that run settles rather than clearing early.
 		if (!ctx.isIdle()) return;
@@ -762,6 +874,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		updateWidget();
 		syncStatus(ctx);
+		await drainRoutingQueue(ctx);
 	});
 	pi.on("session_shutdown", () => { for (const state of agentStates.values()) { clearInterval(state.timer); state.timer = undefined; if (state.activeRun) terminateRun(state.activeRun); } });
 	pi.on("session_start", async (_event, ctx) => {
@@ -788,6 +901,7 @@ export default function (pi: ExtensionAPI) {
 			if (typeof enabled === "boolean") agentFastOverrides.set(name, enabled);
 		}
 		restoreTeam(ctx);
+		restoreRouting(ctx);
 		for (const state of agentStates.values()) state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx);
 		if (rootAgent) {
 			const modelName = effectiveModel(rootAgent, ctx); const slash = modelName.indexOf("/");

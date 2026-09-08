@@ -1,5 +1,7 @@
 default:
   main: orchestrator
+  auto-spawn: true
+  auto-spawn-limit: 3
   subs:
     - understand
     - iterate

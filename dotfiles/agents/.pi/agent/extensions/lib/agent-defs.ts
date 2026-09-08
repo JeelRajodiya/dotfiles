@@ -7,6 +7,7 @@ export interface AgentDef {
 	description: string;
 	model?: string;
 	fast?: boolean;
+	limitations?: string;
 	tools: string;
 	systemPrompt: string;
 	file: string;
@@ -18,6 +19,7 @@ export const DEFAULT_TOOLS = "read,grep,find,ls";
 export const CUSTOM_AGENT: AgentDef = {
 	name: "custom",
 	description: "",
+	limitations: "No specialist guarantees.",
 	tools: DEFAULT_TOOLS,
 	systemPrompt: "You are a focused general-purpose agent. Complete the assigned goal directly and report concise results.",
 	file: "<custom>",
@@ -48,6 +50,7 @@ export function parseAgentMarkdown(raw: string, file: string): AgentDef | null {
 		description: frontmatter.description || "",
 		model: frontmatter.model,
 		fast: frontmatter.fast === "true" ? true : frontmatter.fast === "false" ? false : undefined,
+		limitations: frontmatter.limitations,
 		tools: frontmatter.tools || DEFAULT_TOOLS,
 		systemPrompt: match[2].trim(),
 		file,
@@ -82,6 +85,8 @@ export function scanAgentDirs(cwd: string, agentDir: string): AgentDef[] {
 export interface TeamDef {
 	members: string[];
 	root?: string;
+	autoSpawn?: boolean;
+	autoSpawnLimit?: number;
 }
 
 /** Minimal reader for flat `team:\n  - member` and rooted `team:\n  main: root\n  subs:\n    - member` shapes. */
@@ -97,6 +102,10 @@ export function parseTeams(text: string): Record<string, TeamDef> {
 		}
 		const root = current && line.match(/^\s+main:\s*(.+?)\s*$/)?.[1]?.trim();
 		if (root && current) teams[current].root = root;
+		const autoSpawn = current && line.match(/^\s+auto-spawn:\s*(true|false)\s*$/i)?.[1]?.toLowerCase();
+		if (autoSpawn && current) teams[current].autoSpawn = autoSpawn === "true";
+		const autoSpawnLimit = current && line.match(/^\s+auto-spawn-limit:\s*(\d+)\s*$/)?.[1];
+		if (autoSpawnLimit && current) teams[current].autoSpawnLimit = Number(autoSpawnLimit);
 		const member = current && line.match(/^\s+-\s+(.+)$/)?.[1]?.trim();
 		if (member && current) teams[current].members.push(member);
 	}

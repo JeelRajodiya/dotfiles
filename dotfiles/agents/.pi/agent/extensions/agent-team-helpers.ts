@@ -47,6 +47,58 @@ export function nextAgentName(base: string, existingNames: Iterable<string>): st
 
 export const isAgentReturning = (status: string): boolean => status === "waiting";
 
+export type AgentOrigin = "default" | "user" | "host";
+export type TaskHistoryEntry = { task: string; outcome: AgentCompletionStatus };
+type RoutingAgent = { name: string; base: string; origin: AgentOrigin; status: string; history: readonly TaskHistoryEntry[] };
+
+const redactTask = (task: string) => cleanActivity(task)
+	.replace(/\b((?:api[_-]?key|token|secret|password)\s*[:=])\s*\S+/gi, "$1 [redacted]")
+	.slice(0, 160);
+
+/** Keep compact completed-task context in memory only. */
+export function appendTaskHistory(history: readonly TaskHistoryEntry[], task: string, outcome: AgentCompletionStatus, limit = 6): TaskHistoryEntry[] {
+	if (!task.trim()) return [...history];
+	return [...history, { task: redactTask(task), outcome }].slice(-limit);
+}
+
+export function isAvailableForRouting(agent: RoutingAgent, base: string, preferredInstance?: string): boolean {
+	return agent.base.toLowerCase() === base.toLowerCase()
+		&& agent.status !== "running" && agent.status !== "waiting"
+		&& (!preferredInstance || agent.name.toLowerCase() === preferredInstance.toLowerCase());
+}
+
+/** Prefer an explicitly selected relevant instance; never infer relevance from task text. */
+export function selectRoutingAgent<T extends RoutingAgent>(agents: readonly T[], base: string, preferredInstance?: string): T | undefined {
+	return agents.find(agent => isAvailableForRouting(agent, base, preferredInstance))
+		?? agents.find(agent => isAvailableForRouting(agent, base));
+}
+
+export function canKillHostAgent(agent: Pick<RoutingAgent, "origin" | "status">): boolean {
+	return agent.origin === "host" && agent.status !== "running" && agent.status !== "waiting";
+}
+
+export type RoutingDecision = { action: "steer"; agent: string } | { action: "reuse"; agent: string } | { action: "spawn" } | { action: "queue" } | { action: "related-unavailable" };
+export function decideRouting<T extends RoutingAgent>(agents: readonly T[], base: string, relation: "related" | "new", preferredInstance: string | undefined, autoSpawn: boolean, hostCount: number, limit: number): RoutingDecision {
+	if (relation === "related") {
+		const related = preferredInstance && agents.find(agent => agent.name.toLowerCase() === preferredInstance.toLowerCase() && agent.base.toLowerCase() === base.toLowerCase() && agent.status === "running");
+		return related ? { action: "steer", agent: related.name } : { action: "related-unavailable" };
+	}
+	const available = selectRoutingAgent(agents, base, preferredInstance);
+	if (available) return { action: "reuse", agent: available.name };
+	return autoSpawn && hostCount < limit ? { action: "spawn" } : { action: "queue" };
+}
+
+export function updateQueuedItem<T extends { id: string }>(queue: readonly T[], id: string, update: (item: T) => T): T[] | undefined {
+	const index = queue.findIndex(item => item.id === id);
+	if (index < 0) return undefined;
+	const next = [...queue]; next[index] = update(next[index]!);
+	return next;
+}
+
+export function removeQueuedItem<T extends { id: string }>(queue: readonly T[], id: string): T[] | undefined {
+	return queue.some(item => item.id === id) ? queue.filter(item => item.id !== id) : undefined;
+}
+
 export function shouldIgnoreAgentRunEvent(finished: boolean, stopping: boolean): boolean {
 	return finished || stopping;
 }
