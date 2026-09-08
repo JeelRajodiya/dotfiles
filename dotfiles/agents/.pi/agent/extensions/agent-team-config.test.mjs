@@ -8,7 +8,9 @@ const frontmatter = (path) => Object.fromEntries(
 );
 
 const team = read("agents/teams.yaml");
+const orchestrator = read("agents/orchestrator.md");
 assert.match(team, /^default:\n  main: orchestrator\n  auto-spawn: true\n  auto-spawn-limit: 3\n  subs:\n    - understand\n    - iterate\n    - reviewer$/m);
+assert.match(read("settings.json"), /"npm:@juicesharp\/rpiv-ask-user-question"/);
 assert.deepEqual(frontmatter("agents/orchestrator.md"), {
 	name: "orchestrator",
 	description: "User-facing coordinator with approval-gated implementation planning",
@@ -21,8 +23,11 @@ for (const name of ["understand", "iterate"]) {
 	assert.equal(config.fast, "true");
 	assert.ok(config.limitations);
 }
-assert.match(read("agents/orchestrator.md"), /An implementation request starts planning; it is not approval to implement an unseen plan\./);
-assert.match(read("agents/orchestrator.md"), /Ask for explicit confirmation and wait for it before dispatching Iterate\./);
+assert.match(orchestrator, /When ask_user_question is available, you MUST use it for blocking clarifications, material alternatives, implementation-plan approval, and renewed approval after material scope changes\./);
+assert.match(orchestrator, /Batch all known decisions into one call; never make back-to-back questionnaire calls\./);
+assert.match(orchestrator, /Keep rhetorical questions, direct answers, status updates, nonblocking suggestions, and already-answered questions in prose\. If unavailable or noninteractive, ask the necessary question in text and wait\./);
+assert.match(orchestrator, /An implementation request starts planning; it is not approval to implement an unseen plan\./);
+assert.match(orchestrator, /Ask for explicit confirmation and wait for it before dispatching Iterate\./);
 assert.match(read("agents/iterate.md"), /wait for renewed user approval before changing scope\./);
 assert.equal(frontmatter("agents/reviewer.md").model, "openai-codex/gpt-5.6-sol");
 assert.match(read("extensions/agent-team.ts"), /const DEFAULT_TEAM = "default"/);
