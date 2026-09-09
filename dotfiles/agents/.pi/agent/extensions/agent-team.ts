@@ -985,6 +985,11 @@ export default function (pi: ExtensionAPI) {
 			}));
 			agentAutocompleteInstalled = true;
 		}
+		// Pi carries the active tool list across a session reload, so a previous session's
+		// narrowing survives into this one. Give the host its tools back before re-reading them:
+		// clearing the capture without restoring first would leave a team-less session stranded
+		// on the six team tools, with no read, edit, or bash.
+		if (hostTools) pi.setActiveTools(hostTools);
 		widgetCtx = ctx; parentSessionId = ctx.sessionManager.getSessionId(); viewedAgent = undefined; hostTools = undefined; rootModelRestored = true; hostBusy = !ctx.isIdle(); pendingDeliveries.length = 0; loadAgents(ctx.cwd);
 		agentModelOverrides.clear();
 		agentFastOverrides.clear();
