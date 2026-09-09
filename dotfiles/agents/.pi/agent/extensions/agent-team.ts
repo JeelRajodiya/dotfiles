@@ -685,15 +685,29 @@ export default function (pi: ExtensionAPI) {
 	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | interrupt <agent> | clear <subagent-name> | clear-all-sub | remove <name> | compact <name> | compact-all-sub | promote <instance|base> | demote | list | model <name> [model|inherit] | fast <name> [on|off] | auto-spawn <on|off|limit N> | queue [edit <id> <task|target> ...|remove <id>] | view <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
+	/**
+	 * The instance list a replacement session should start from. It has to match what
+	 * activateTeam/addDefaultAgent would build in place — same auto-suffixed names, same
+	 * default ownership, a fresh session key each — or switching teams by forking produces a
+	 * differently named, differently owned team than switching teams in place.
+	 */
 	const teamSnapshot = (teamName: string | undefined): SavedTeam => {
 		const team = teamName ? teams[teamName] : undefined;
 		const instances: SavedInstance[] = [];
-		for (const member of team?.members ?? []) {
+		const addSnapshotInstance = (member: string): SavedInstance | undefined => {
 			const def = definitionFor(member);
-			if (def && !instances.some(instance => key(instance.name) === key(def.name))) instances.push({ name: def.name, type: def.name, goal: def.description });
-		}
-		const root = team?.root && definitionFor(team.root);
-		if (root && !instances.some(instance => key(instance.name) === key(root.name))) instances.push({ name: root.name, type: root.name, goal: root.description });
+			if (!def) return undefined;
+			const existing = instances.find(instance => key(instance.type) === key(def.name));
+			if (existing) return existing;
+			const instance: SavedInstance = {
+				name: nextAgentName(def.name, instances.map(candidate => candidate.name)),
+				type: def.name, goal: def.description, autoName: true, origin: "default", sessionKey: randomUUID(),
+			};
+			instances.push(instance);
+			return instance;
+		};
+		for (const member of team?.members ?? []) addSnapshotInstance(member);
+		const root = team?.root ? addSnapshotInstance(team.root) : undefined;
 		return { instances, root: root?.name };
 	};
 	async function activateTeam(teamName: string | undefined, ctx: any) {
@@ -855,7 +869,7 @@ export default function (pi: ExtensionAPI) {
 					const choice = await ctx.ui.select("Switch team session?", ["start fresh", "fork current session"]);
 					if (!choice) return;
 					const snapshot = teamSnapshot(selected);
-						const seedTargetSession = async (sessionManager: any) => {
+					const seedTargetSession = async (sessionManager: any) => {
 						sessionManager.appendCustomEntry("agent-team-instances", snapshot);
 						sessionManager.appendCustomEntry("agent-team-model-overrides", { overrides: {} });
 						sessionManager.appendCustomEntry("agent-team-fast-overrides", { overrides: {} });
