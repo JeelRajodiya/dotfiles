@@ -897,31 +897,55 @@ export default function (pi: ExtensionAPI) {
 	pi.on("input", async (event, ctx) => { if (event.source !== "interactive" || !viewedAgent || viewedAgent === rootAgent || event.text.startsWith("/")) return; try { const submitted = await submitAgent(viewedAgent.name, event.text, ctx); ctx.ui.notify(`${displayName(viewedAgent.name)} ${submitted.status === "steered" ? "steering accepted" : "started"}`, "info"); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); } return { action: "handled" as const }; });
 	// Prompt catalogs are deliberately summaries, never child output, history, or tool activity.
 	const promptSummary = (value: string, limit: number) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x1F\x7F]/g, " ").replace(/\s+/g, " ").trim().slice(0, limit);
-	const delegationCatalog = (states: AgentState[]) => {
+	// The prompt sits in front of every message, so anything that moves in it re-bills the whole
+	// conversation as uncached input. Only session-stable fields go here; the rest ships as a message.
+	const delegationRoster = (states: AgentState[]) => {
 		const shown = states.slice(0, 20).map(state => {
 			const name = promptSummary(state.name, 64); const type = promptSummary(state.def.name, 64); const capability = promptSummary(state.def.description || state.goal, 180);
 			const limitations = promptSummary(state.def.limitations || "No additional limits declared.", 140); const tools = promptSummary(state.def.tools, 140);
-			const task = promptSummary(state.task, 140); const history = state.history.slice(-3).map(entry => `${entry.outcome}:${promptSummary(entry.task, 96)}`).join(" | ") || "(none)";
-			const model = promptSummary(effectiveModel(state, widgetCtx), 96); const fast = effectiveFast(state, widgetCtx) ? "on" : "off";
-			const detail = state.status === "running" ? `; current task: ${task || "working"}; elapsed: ${Math.round(state.elapsed / 1000)}s`
-				: (state.status === "done" || state.status === "error") && task && state.task === task ? `; last task: ${task}` : "";
-			return `- name: ${name}; base type: ${type}; capability: ${capability}; limitations: ${limitations}; model: ${model}; fast: ${fast}; tools: ${tools}; status: ${state.status}; recent completed tasks: ${history}${detail}`;
+			return `- name: ${name}; base type: ${type}; capability: ${capability}; limitations: ${limitations}; tools: ${tools}`;
 		});
-		if (states.length > shown.length) shown.push(`(${states.length - shown.length} additional instances omitted to keep this catalog bounded.)`);
+		if (states.length > shown.length) shown.push(`(${states.length - shown.length} additional instances omitted to keep this roster bounded.)`);
 		return shown.join("\n") || "(none)";
 	};
-	const delegationGuidance = "Consult status before delegation: steer a relevant running instance rather than starting duplicate work; choose an idle or done specialist for new work. Status is advisory—dispatch_agent and runtime remain authoritative.";
+	const delegationStatus = (states: AgentState[]) => {
+		const shown = states.slice(0, 20).map(state => {
+			const name = promptSummary(state.name, 64); const task = promptSummary(state.task, 140);
+			const history = state.history.slice(-3).map(entry => `${entry.outcome}:${promptSummary(entry.task, 96)}`).join(" | ") || "(none)";
+			const model = promptSummary(effectiveModel(state, widgetCtx), 96); const fast = effectiveFast(state, widgetCtx) ? "on" : "off";
+			const detail = state.status === "running" ? `; current task: ${task || "working"}`
+				: (state.status === "done" || state.status === "error") && task && state.task === task ? `; last task: ${task}` : "";
+			return `- ${name}: ${state.status}; model: ${model}; fast: ${fast}; recent completed tasks: ${history}${detail}`;
+		});
+		if (states.length > shown.length) shown.push(`(${states.length - shown.length} additional instances omitted.)`);
+		return shown.join("\n") || "(none)";
+	};
+	// An unchanged snapshot is still true where it sits, so re-emitting would only bury it.
+	let lastStatusSnapshot: string | undefined;
+	const statusMessage = (states: AgentState[]) => {
+		const snapshot = delegationStatus(states);
+		if (snapshot === lastStatusSnapshot) return undefined;
+		lastStatusSnapshot = snapshot;
+		return { customType: "agent-team-status", content: `Live team status \u2014 this snapshot supersedes any earlier one:\n${snapshot}`, display: false, details: { instances: states.length } };
+	};
+	const delegationGuidance = "Consult the latest agent-team-status snapshot before delegation: steer a relevant running instance rather than starting duplicate work; choose an idle or done specialist for new work. Status is advisory\u2014dispatch_agent and runtime remain authoritative.";
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (rootAgent) {
 			rootAgent.task = event.prompt; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens;
-			const catalog = delegationCatalog([...agentStates.values()].filter(state => state !== rootAgent));
-			return { systemPrompt: `${event.systemPrompt}\n\n# Root agent identity: ${rootAgent.name} (${rootAgent.def.name})\nGoal: ${rootAgent.goal}\n\n${rootAgent.def.systemPrompt}\n\nYou are the visible host assistant. Delegate focused work with dispatch_agent or directly stop a running child with interrupt_agent:\n${catalog}\n${delegationGuidance}\nNever dispatch yourself. Child results are private context; synthesize one coherent answer for the user.` };
+			const subs = [...agentStates.values()].filter(state => state !== rootAgent);
+			return {
+				systemPrompt: `${event.systemPrompt}\n\n# Root agent identity: ${rootAgent.name} (${rootAgent.def.name})\nGoal: ${rootAgent.goal}\n\n${rootAgent.def.systemPrompt}\n\nYou are the visible host assistant. Delegate focused work with dispatch_agent or directly stop a running child with interrupt_agent:\n${delegationRoster(subs)}\n${delegationGuidance}\nNever dispatch yourself. Child results are private context; synthesize one coherent answer for the user.`,
+				message: statusMessage(subs),
+			};
 		}
 		// With no instances there is nobody to dispatch to: leave the host prompt alone rather than
 		// telling it to delegate to an empty catalogue.
 		if (!agentStates.size) return;
-		const catalog = delegationCatalog([...agentStates.values()]);
-		return { systemPrompt: `${event.systemPrompt}\n\nYou are a dispatcher. Delegate through dispatch_agent and use interrupt_agent only to stop a running child. Dynamic instances:\n${catalog}\n${delegationGuidance}\nDo not use codebase tools directly. Synthesize child results into one answer.` };
+		const states = [...agentStates.values()];
+		return {
+			systemPrompt: `${event.systemPrompt}\n\nYou are a dispatcher. Delegate through dispatch_agent and use interrupt_agent only to stop a running child. Dynamic instances:\n${delegationRoster(states)}\n${delegationGuidance}\nDo not use codebase tools directly. Synthesize child results into one answer.`,
+			message: statusMessage(states),
+		};
 	});
 	pi.events.on("openai-fast:changed", () => updateWidget());
 	pi.on("thinking_level_select", () => updateWidget());
