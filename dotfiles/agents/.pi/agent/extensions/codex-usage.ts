@@ -1,9 +1,10 @@
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
+// Resolve against the configured agent dir like every other extension here; a hardcoded
+// ~/.pi/agent silently reads the wrong auth file when PI_AGENT_DIR moves it.
+const AUTH_FILE = join(getAgentDir(), "auth.json");
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 
 export default function codexUsage(pi: ExtensionAPI) {
@@ -24,12 +25,12 @@ export default function codexUsage(pi: ExtensionAPI) {
 					signal: AbortSignal.timeout(15_000),
 				});
 				// response.json() is `unknown`; the shape is only asserted here, and the
-				// Number.isFinite guards below are what actually validate it.
+				// guards below are what actually validate it.
 				const payload = await response.json() as { rate_limit?: { primary_window?: { used_percent?: number; reset_after_seconds?: number } } };
 				const window = payload.rate_limit?.primary_window;
 				const used = window?.used_percent;
 				const reset = window?.reset_after_seconds;
-				if (!response.ok || !Number.isFinite(used) || !Number.isFinite(reset)) {
+				if (!response.ok || typeof used !== "number" || !Number.isFinite(used) || typeof reset !== "number" || !Number.isFinite(reset)) {
 					throw new Error("usage unavailable");
 				}
 				const days = Math.floor(reset / 86_400);
