@@ -72,25 +72,29 @@ export function syncState(
 	telemetry: FooterTelemetry = {},
 ): void {
 	const totals = getUsageTotals(ctx);
+	// One pass over the transcript: this runs on every footer refresh, and walking the whole
+	// entry list twice for two independent lookups showed up on long sessions.
+	const entries = ctx.sessionManager.getEntries();
 	const seenSubagentUsage = new Set<string>();
-	const subagentCost = ctx.sessionManager.getEntries()
-		.filter(entry => entry.type === "custom" && entry.customType === "agent-team-usage")
-		.reduce((total, entry) => {
+	let subagentCost = 0;
+	let fastEnabled = false;
+	for (const entry of entries) {
+		if (entry.type !== "custom") continue;
+		if (entry.customType === "agent-team-usage") {
 			const data = entry.data as { sourceEventId?: unknown; usage?: { cost?: { total?: unknown } } } | undefined;
-			if (typeof data?.sourceEventId !== "string" || seenSubagentUsage.has(data.sourceEventId)) return total;
+			if (typeof data?.sourceEventId !== "string" || seenSubagentUsage.has(data.sourceEventId)) continue;
 			seenSubagentUsage.add(data.sourceEventId);
 			const cost = data.usage?.cost?.total;
-			return total + (typeof cost === "number" && Number.isFinite(cost) ? cost : 0);
-		}, 0);
+			if (typeof cost === "number" && Number.isFinite(cost)) subagentCost += cost;
+		} else if (entry.customType === "openai-fast") {
+			// Last one wins, matching the previous findLast.
+			fastEnabled = (entry.data as { enabled?: boolean } | undefined)?.enabled === true;
+		}
+	}
 	const m = ctx.model;
 	state.modelId = m?.id ?? "";
 	state.modelName = m?.name ?? "";
-	const fastEntry = ctx.sessionManager.getEntries().findLast(
-		(entry) => entry.type === "custom" && entry.customType === "openai-fast",
-	);
-	state.fast = (m?.provider === "openai" || m?.provider === "openai-codex") &&
-		fastEntry?.type === "custom" &&
-		(fastEntry.data as { enabled?: boolean } | undefined)?.enabled === true;
+	state.fast = (m?.provider === "openai" || m?.provider === "openai-codex") && fastEnabled;
 	// Retained as a compatibility snapshot only; production surfaces format from raw fields.
 	state.modelLabel = modelLabelFor(state, "id");
 	state.providerLabel = formatProviderLabel(ctx.model?.provider);
