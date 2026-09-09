@@ -584,13 +584,17 @@ export default function (pi: ExtensionAPI) {
 		if (drainingQueue || !ctx.isIdle()) return;
 		drainingQueue = true;
 		try {
-			for (let index = 0; index < routingQueue.length; index++) {
-				const item = routingQueue[index];
+			// Snapshot the ids: routeTask awaits, and /agents queue edit|remove reassigns
+			// routingQueue while it does, so an index captured before the await can point at a
+			// different task by the time it is removed.
+			for (const id of routingQueue.map(item => item.id)) {
+				const item = routingQueue.find(candidate => candidate.id === id);
+				if (!item) continue;
 				try {
 					const routed = await routeTask(item.type, item.task, "new", item.approved, ctx, item.instance, false);
 					if (!routed) continue;
-					routingQueue.splice(index, 1); persistRouting();
-					ctx.ui.notify(`${displayName(item.type)} queued task started`, "success");
+					routingQueue = removeQueuedItem(routingQueue, id) ?? routingQueue; persistRouting();
+					ctx.ui.notify(`${displayName(item.type)} queued task started`, "info");
 					return;
 				} catch (error) {
 					ctx.ui.notify(`Queued ${displayName(item.type)} task retained: ${error instanceof Error ? error.message : String(error)}`, "warning");
