@@ -13,7 +13,14 @@ export interface AgentDef {
 	file: string;
 }
 
-export const DEFAULT_TOOLS = "read,grep,find,ls";
+/**
+ * Pi's read-only tools. Two places need this list — the default toolset for an agent definition
+ * that declares none, and abort-rewind's "did this turn mutate anything" check — and they were
+ * drifting apart as two hardcoded copies.
+ */
+export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
+
+export const DEFAULT_TOOLS = READ_ONLY_TOOLS.join(",");
 
 /** Always-available definition so a team can be built without writing an .md file first. */
 export const CUSTOM_AGENT: AgentDef = {

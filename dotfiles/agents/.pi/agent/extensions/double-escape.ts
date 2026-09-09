@@ -5,6 +5,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import { canRewind, dropAbandonedTurn } from "./lib/abort-rewind.ts";
+import { READ_ONLY_TOOLS } from "./lib/agent-defs.ts";
 
 type Turn = { prompt: string; rootId: string; parentId: string | null; abortRequested: boolean; mutated: boolean };
 
@@ -55,7 +56,7 @@ export default function (pi: ExtensionAPI) {
 	// mutation-bearing so this extension never removes history when it cannot know.
 	pi.on("tool_execution_start", event => {
 		if (!turn) return;
-		if (!["read", "grep", "find", "ls"].includes(event.toolName)) turn.mutated = true;
+		if (!(READ_ONLY_TOOLS as readonly string[]).includes(event.toolName)) turn.mutated = true;
 	});
 
 	pi.on("session_start", (_event, ctx) => {
