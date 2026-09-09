@@ -23,7 +23,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadSessions, parseSessionLines, type SessionRecord } from "./lib/session-cost.ts";
+import { loadSessions, type SessionRecord } from "./lib/session-cost.ts";
 import { completionEventForItem, completionUsageKey, MAX_COMPLETION_USAGE_KEYS, parseUsageEvents, rankCompletionItems, type UsageAutocompleteItem } from "./lib/completion-usage.ts";
 
 const usageFile = join(getAgentDir(), "usage-ranking.jsonl");
@@ -94,7 +94,7 @@ function loadUsage() {
 	usageStamp = stamp;
 }
 
-function commandFromText(text: string): string | undefined {
+export function commandFromText(text: string): string | undefined {
 	const skill = text.trimStart().match(/^<skill\s+name="([^"]+)"/);
 	return skill ? `skill:${skill[1]}` : text.trim().match(/^\/([^\s]+)/)?.[1];
 }
@@ -116,7 +116,7 @@ function recordCompletion(item: UsageAutocompleteItem) {
 	usageStamp = usageFileStamp();
 }
 
-function rank<T>(items: T[], counts: Map<string, number>, key: (item: T) => string, query = "", text = key): T[] {
+export function rank<T>(items: T[], counts: Map<string, number>, key: (item: T) => string, query = "", text = key): T[] {
 	const ranked = items
 		.map((item, index) => ({ item, index }))
 		.sort((a, b) =>
@@ -127,12 +127,12 @@ function rank<T>(items: T[], counts: Map<string, number>, key: (item: T) => stri
 	return fuzzyFilter(ranked, query, text);
 }
 
-function commandSearchText(value: string, query: string): string {
+export function commandSearchText(value: string, query: string): string {
 	const explicitSkill = "skill:".startsWith(query.toLowerCase()) || query.toLowerCase().startsWith("skill:");
 	return explicitSkill ? value : value.replace(/^skill:/, "");
 }
 
-function isInMonths(timestamp: unknown, months = 1, now = new Date()): boolean {
+export function isInMonths(timestamp: unknown, months = 1, now = new Date()): boolean {
 	if (typeof timestamp !== "string") return false;
 	const date = new Date(timestamp);
 	const start = new Date(now);
@@ -143,7 +143,7 @@ function isInMonths(timestamp: unknown, months = 1, now = new Date()): boolean {
 	return date >= start && date <= now;
 }
 
-function scanSession(records: SessionRecord[], counts?: Map<string, number>, costs?: Map<string, number>, requests?: Map<string, number>, months = 1, now = new Date()) {
+export function scanSession(records: SessionRecord[], counts?: Map<string, number>, costs?: Map<string, number>, requests?: Map<string, number>, months = 1, now = new Date()) {
 	let activeModel: string | undefined;
 	for (const record of records) {
 		if (record.type === "model_change") { activeModel = record.model; continue; }
@@ -165,7 +165,12 @@ function ensureMonthlyUsage(): Promise<void> {
 	return monthlyUsageLoad;
 }
 
-async function loadMonthlyStats() {
+type MonthlyStats = {
+	counts: Map<string, number>; costs: Map<string, number>; requests: Map<string, number>;
+	ratioCounts: Map<string, number>; ratioRequests: Map<string, number>;
+};
+
+async function loadMonthlyStats(): Promise<MonthlyStats> {
 	const counts = new Map<string, number>();
 	const requests = new Map<string, number>();
 	const costs = new Map<string, number>();
@@ -179,11 +184,11 @@ async function loadMonthlyStats() {
 	return { counts, costs, requests, ratioCounts, ratioRequests };
 }
 
-function requestsPerMessage(requests: number, messages: number): string {
+export function requestsPerMessage(requests: number, messages: number): string {
 	return messages > 0 ? `${(requests / messages).toFixed(1)} req/msg` : "req/msg n/a";
 }
 
-function alignColumns(rows: string[][]): string[] {
+export function alignColumns(rows: string[][]): string[] {
 	const widths = rows[0].map((_, column) => Math.max(...rows.map(row => visibleWidth(row[column]))));
 	return rows.map(row => row.map((cell, column) => {
 		const padding = " ".repeat(widths[column] - visibleWidth(cell));
@@ -203,15 +208,31 @@ class ModelPicker implements Component, Focusable {
 	get focused() { return this._focused; }
 	set focused(value: boolean) { this._focused = value; this.input.focused = value; }
 
+	private readonly models: Model<any>[];
+	private readonly stats: MonthlyStats;
+	private readonly tui: TUI;
+	private readonly theme: Theme;
+	private readonly keybindings: KeybindingsManager;
+	private readonly done: (model?: Model<any>) => void;
+
+	// Plain fields, not constructor parameter properties: Node's strip-only TypeScript mode
+	// rejects those, which made this whole module unimportable from tests/ — see the same note
+	// in lib/agent-activity.ts.
 	constructor(
-		private readonly models: Model<any>[],
-		private readonly stats: Awaited<ReturnType<typeof loadMonthlyStats>>,
-		private readonly tui: TUI,
-		private readonly theme: Theme,
-		private readonly keybindings: KeybindingsManager,
-		private readonly done: (model?: Model<any>) => void,
+		models: Model<any>[],
+		stats: MonthlyStats,
+		tui: TUI,
+		theme: Theme,
+		keybindings: KeybindingsManager,
+		done: (model?: Model<any>) => void,
 		initialQuery = "",
 	) {
+		this.models = models;
+		this.stats = stats;
+		this.tui = tui;
+		this.theme = theme;
+		this.keybindings = keybindings;
+		this.done = done;
 		this.input.setValue(initialQuery);
 		this.update();
 	}
@@ -298,81 +319,10 @@ class ModelPicker implements Component, Focusable {
 	invalidate() { this.update(); this.container.invalidate(); }
 }
 
-function completedModelQuery(submitting: boolean, lines: string[]): string | undefined {
+export function completedModelQuery(submitting: boolean, lines: string[]): string | undefined {
 	if (!submitting) return;
 	const match = lines.join("\n").trim().match(/^\/model(?:\s+(.*))?$/);
 	return match ? match[1] ?? "" : undefined;
-}
-
-if (process.env.PI_USAGE_RANK_SELF_TEST) {
-	if (commandFromText('/skill:commit-unstaged') !== 'skill:commit-unstaged' ||
-		commandFromText('<skill name="commit-unstaged" location="/tmp/SKILL.md">') !== 'skill:commit-unstaged' ||
-		commandFromText('ordinary message') !== undefined) throw new Error('Skill command recognition failed');
-	const aligned = alignColumns([["Model", "Msg", "Cost"], ["模型", "1", "$2"], ["long-model", "123", "n/a"]]);
-	if (new Set(aligned.map(visibleWidth)).size !== 1 || !aligned[1].includes("  1    $2")) throw new Error("Column alignment failed");
-	const now = new Date(2026, 0, 15);
-	for (const [timestamp, monthly, twoMonths] of [
-		[new Date(2026, 0, 1).toISOString(), true, true],
-		[new Date(2025, 11, 15).toISOString(), true, true],
-		[new Date(2025, 11, 14).toISOString(), false, true],
-		[new Date(2025, 10, 15).toISOString(), false, true],
-		[new Date(2025, 10, 14).toISOString(), false, false],
-		[new Date(2025, 10, 30).toISOString(), false, true],
-		[new Date(2026, 1, 1).toISOString(), false, false],
-		["invalid", false, false],
-	] as const) {
-		if (isInMonths(timestamp, 1, now) !== monthly || isInMonths(timestamp, 2, now) !== twoMonths) throw new Error("Month window failed");
-	}
-	if (!isInMonths(new Date(2026, 1, 28).toISOString(), 1, new Date(2026, 2, 31)) ||
-		isInMonths(new Date(2026, 1, 27).toISOString(), 1, new Date(2026, 2, 31)) ||
-		isInMonths(new Date(2026, 0, 16).toISOString(), 1, now)) throw new Error("Rolling month boundary failed");
-	const messages = new Map<string, number>();
-	const requests = new Map<string, number>();
-	const costs = new Map<string, number>();
-	const timestamp = new Date().toISOString();
-	const session = parseSessionLines([
-		JSON.stringify({ type: "model_change", provider: "test", modelId: "sol" }),
-		JSON.stringify({ type: "message", timestamp, message: { role: "user" } }),
-		JSON.stringify({ type: "message", timestamp, message: { role: "assistant", provider: "test", model: "sol", usage: { cost: { total: 1.75 } } } }),
-		JSON.stringify({ type: "message", timestamp: "2000-01-01T00:00:00Z", message: { role: "user" } }),
-		"{ truncated write",
-		JSON.stringify({ type: "message", timestamp, message: { role: "assistant", provider: "test", model: "sol" } }),
-		JSON.stringify({ type: "message", timestamp, message: { role: "toolResult" } }),
-		JSON.stringify({ type: "message", timestamp: "2000-01-01T00:00:00Z", message: { role: "assistant", provider: "test", model: "sol" } }),
-		"",
-	].join("\n"));
-	scanSession(session, messages, costs, requests);
-	// The truncated line above must cost only itself, never the entries that follow it.
-	if (messages.get("test/sol") !== 1 || requests.get("test/sol") !== 2 || costs.get("test/sol") !== 1.75) throw new Error("Monthly model aggregation failed");
-	if (requestsPerMessage(5, 2) !== "2.5 req/msg" || requestsPerMessage(0, 1) !== "0.0 req/msg" || requestsPerMessage(5, 0) !== "req/msg n/a") throw new Error("Request/message ratio failed");
-	const counts = new Map([["b", 2], ["c", 1]]);
-	console.assert(rank(["a", "b", "c"], counts, value => value).join("") === "bca");
-	const commands = ["understand", "understand-fast", "understand-thorough", "skill:commit-unstaged", "subagents-doctor"];
-	const usage = new Map([["skill:commit-unstaged", 1000], ["understand-fast", 100]]);
-	for (const [query, first] of [["", "skill:commit-unstaged"], ["und", "understand-fast"],
-		["UNDERSTAND", "understand"], ["skill:commit", "skill:commit-unstaged"]]) {
-		if (rank(commands, usage, value => value, query)[0] !== first) throw new Error(`Search ranking failed: ${query}`);
-	}
-	const matches = rank(commands, new Map([["skill:commit-unstaged", 1000]]), value => value, "und");
-	if (matches[0] !== "understand" || matches.length !== commands.length) throw new Error("Command relevance regression");
-	const skillCommands = ["compact", "skill:commit-unstaged", "skill:commit-push-pr", "understand"];
-	for (const [query, first] of [["com", "skill:commit-unstaged"], ["COM", "skill:commit-unstaged"],
-		["compact", "compact"], ["ski", "skill:commit-unstaged"], ["skill:com", "skill:commit-unstaged"],
-		["und", "understand"], ["", "skill:commit-unstaged"]]) {
-		if (rank(skillCommands, usage, value => value, query, value => commandSearchText(value, query))[0] !== first)
-			throw new Error(`Skill namespace ranking failed: ${query}`);
-	}
-	const models = [{ id: "a", name: "Sol" }, { id: "b", name: "Something old" }];
-	if (rank(models, new Map([["b", 1000]]), model => model.id, "sol", model => model.name)[0].id !== "a")
-		throw new Error("Model name relevance regression");
-	for (const [submit, lines, expected] of [
-		[true, ["/model "], ""],
-		[true, ["/model sol"], "sol"],
-		[false, ["/model "], undefined],
-		[true, ["/models"], undefined],
-	] as const) {
-		if (completedModelQuery(submit, [...lines]) !== expected) throw new Error("Model completion routing failed");
-	}
 }
 
 export default function (pi: ExtensionAPI) {
