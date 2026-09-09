@@ -80,7 +80,7 @@ import { applyProjectRefreshToState } from "./project-state";
 import { readRuntimeInfo } from "./runtime";
 import { installSelectorBorderStyle, removeSelectorBorderStyle } from "./selector-border";
 import { SessionLifecycle } from "./session-lifecycle";
-import { installThinkingTimer } from "./thinking-timer";
+import { installThinkingTimer, settleThinkingTimers } from "./thinking-timer";
 import { registerZentuiSettingsCommand } from "./settings-command";
 import { createInitialState, type FooterState, modelLabelFor, syncState } from "./state";
 import { resolveFooterTelemetry } from "./telemetry";
@@ -236,11 +236,18 @@ export default function (pi: ExtensionAPI) {
 	let accentRailLayoutPatchInstallSerial = 0;
 	let cleanupThinkingTimer: () => void = () => {};
 	let hostTokenBase = { input: 0, output: 0 };
-	try {
-		cleanupThinkingTimer = installThinkingTimer();
-	} catch {
-		// Pi versions without AssistantMessageComponent.updateContent keep the native label.
-	}
+	// Installed per session, like every other patch here. Installing once at extension load and
+	// tearing down on session_shutdown left the timer dead for every session after the first in
+	// the same process.
+	const reinstallThinkingTimer = () => {
+		cleanupThinkingTimer();
+		cleanupThinkingTimer = () => {};
+		try {
+			cleanupThinkingTimer = installThinkingTimer();
+		} catch {
+			// Pi versions without AssistantMessageComponent.updateContent keep the native label.
+		}
+	};
 
 	const recordAccentRailLayoutPatchDiagnostic = (
 		diagnostic: AccentRailLayoutPatchDiagnostic,
@@ -1172,6 +1179,7 @@ export default function (pi: ExtensionAPI) {
 		if (!sessionLifecycle.isCurrent(lifecycleGeneration)) return;
 		liveContext.clear();
 		interactionMetrics.shutdown();
+		reinstallThinkingTimer();
 		state.sessionStartEpoch = Date.now();
 		invalidateUsageTotalsCache();
 		resetAgentTimer();
@@ -1336,6 +1344,7 @@ export default function (pi: ExtensionAPI) {
 		interactionMetrics.shutdown();
 		workingLine.dispose(ctx);
 		cleanupThinkingTimer();
+		cleanupThinkingTimer = () => {};
 		cleanupUi(ctx);
 	});
 
@@ -1358,6 +1367,9 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("agent_end", (event, ctx) => {
 		liveContext.clear();
+		// An aborted or failed turn never sends a final non-streaming update, so its label would
+		// otherwise keep counting up as "Thinking (…)" for the rest of the session.
+		settleThinkingTimers();
 		const displayTokens = interactionMetrics.currentDisplayTokens();
 		interactionMetrics.agentEnd();
 		pauseAgentRun();

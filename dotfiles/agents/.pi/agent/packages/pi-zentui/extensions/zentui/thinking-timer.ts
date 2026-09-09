@@ -36,6 +36,25 @@ function stopTimer(component: object, state: ThinkingTimerState): void {
 	activeComponents.delete(component);
 }
 
+/**
+ * Stamp every still-ticking label as finished.
+ *
+ * A turn that ends without a final non-streaming updateContent — an abort, a provider error, a
+ * dropped stream — never reaches the else branch below, so its interval keeps redrawing
+ * "Thinking (…)" with the duration climbing forever. Call this whenever the agent settles.
+ */
+export function settleThinkingTimers(now = Date.now()): void {
+	for (const component of [...activeComponents]) {
+		const state = states.get(component);
+		if (!state) {
+			activeComponents.delete(component);
+			continue;
+		}
+		stopTimer(component, state);
+		(component as TimedAssistantMessage).hiddenThinkingLabel = formatThinkingTimerLabel(false, now - state.startedAt);
+	}
+}
+
 /** Add per-message elapsed labels to Pi's hidden-thinking renderer. */
 export function installThinkingTimer(): () => void {
 	const cleanupPatch = installPrototypePatch(
@@ -56,7 +75,10 @@ export function installThinkingTimer(): () => void {
 				states.set(receiver, state);
 				component.hiddenThinkingLabel = formatThinkingTimerLabel(true, now - state.startedAt);
 				if (!state.timer) {
-					state.timer = setInterval(() => component.updateContent(state.message, true), 1000);
+					const ticking = state;
+					state.timer = setInterval(() => component.updateContent(ticking.message, true), 1000);
+					// Never hold the process open for a label; Pi exits while a redraw is pending.
+					state.timer.unref?.();
 					activeComponents.add(receiver);
 				}
 			} else if (state) {
@@ -69,10 +91,7 @@ export function installThinkingTimer(): () => void {
 	);
 
 	return () => {
-		for (const component of activeComponents) {
-			const state = states.get(component);
-			if (state) stopTimer(component, state);
-		}
+		settleThinkingTimers();
 		cleanupPatch();
 	};
 }
