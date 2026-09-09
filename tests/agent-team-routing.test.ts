@@ -1,3 +1,4 @@
+// Run: node tests/agent-team-routing.test.ts
 import assert from "node:assert/strict";
 import {
 	appendTaskHistory,
@@ -5,7 +6,7 @@ import {
 	decideRouting,
 	removeQueuedItem,
 	updateQueuedItem,
-} from "../extensions/agent-team-helpers.ts";
+} from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
 
 const idle = { name: "understand-1", base: "understand", origin: "default" as const, status: "idle", history: [] };
 const busy = { name: "understand-2", base: "understand", origin: "host" as const, status: "running", history: [] };
