@@ -293,6 +293,9 @@ export default function (pi: ExtensionAPI) {
 		state.contextTokens = 0;
 		state.tokens = { input: 0, output: 0 };
 		state.activity = new ActivityLog();
+		// The delegation catalog reads history: a cleared agent that still advertises completed
+		// tasks tells the host it has context it no longer has.
+		state.history = [];
 		state.runCount = 0;
 		state.task = "";
 		state.lastWork = "";
