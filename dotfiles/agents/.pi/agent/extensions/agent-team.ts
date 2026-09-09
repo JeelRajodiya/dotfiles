@@ -396,9 +396,12 @@ export default function (pi: ExtensionAPI) {
 		updateWidget();
 		syncStatus();
 		if (queuedForDelivery) {
-			const result = error ? error.message : output || "(no output)";
+			// OutputBuffer stops at its cap; say so, rather than handing the host a silently
+			// clipped answer it will read as complete.
+			const truncated = run.output.wasTruncated ? "\n\n(child output truncated)" : "";
+			const result = error ? error.message : output ? `${output}${truncated}` : "(no output)";
 			pi.sendMessage({ customType: "agent-team-result", content: `Private result from ${state.name} (${state.def.name}) for ${run.initialTask}:\n${result}`, display: false, details: { agent: state.name, status: outcome, elapsed: state.elapsed } }, { deliverAs: "followUp", triggerTurn: true });
-			widgetCtx?.ui.notify(`${displayName(state.name)} ${state.status === "waiting" ? `is returning its ${outcome} result` : outcome} in ${Math.round(state.elapsed / 1000)}s`, error ? "error" : "success");
+			widgetCtx?.ui.notify(`${displayName(state.name)} ${state.status === "waiting" ? `is returning its ${outcome} result` : outcome} in ${Math.round(state.elapsed / 1000)}s`, error ? "error" : "info");
 		}
 		terminateRun(run);
 	}
@@ -597,6 +600,7 @@ export default function (pi: ExtensionAPI) {
 		if (!state) throw new Error(`Unknown dynamic instance "${name}"`);
 		if (!canKillHostAgent(state)) throw new Error("Only idle host-spawned agents can be killed");
 		removeAgent(state, ctx);
+		return state;
 	}
 	async function compactAgent(name: string, ctx: any) {
 		const state = stateFor(name);
@@ -617,7 +621,7 @@ export default function (pi: ExtensionAPI) {
 			state.contextTokens = compacted.contextTokens ?? 0;
 			state.tokens = compacted.tokens;
 			updateWidget();
-			ctx.ui.notify(`${displayName(state.name)} compacted`, "success");
+			ctx.ui.notify(`${displayName(state.name)} compacted`, "info");
 		} catch (error) {
 			const failure = new Error(`Unable to compact ${displayName(state.name)}: ${error instanceof Error ? error.message : String(error)}`);
 			finishRun(state, run, failure);
@@ -643,7 +647,7 @@ export default function (pi: ExtensionAPI) {
 			const compacted = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
 			const failed = results.flatMap((result, index) => result.status === "rejected" ? [candidates[index]!.name] : []);
 			for (const name of failed) ctx.ui.notify(`${displayName(name)} compaction failed`, "error");
-			ctx.ui.notify([`compacted: ${compacted.join(", ") || "none"}`, `skipped: ${skipped.join(", ") || "none"}`, `failed: ${failed.join(", ") || "none"}`].join("\n"), failed.length ? "warning" : "success");
+			ctx.ui.notify([`compacted: ${compacted.join(", ") || "none"}`, `skipped: ${skipped.join(", ") || "none"}`, `failed: ${failed.join(", ") || "none"}`].join("\n"), failed.length ? "warning" : "info");
 		}).catch(error => {
 			if (generation === lifecycleGeneration) ctx.ui.notify(`Bulk compaction: ${String(error)}`, "error");
 		}).finally(() => {
@@ -659,7 +663,7 @@ export default function (pi: ExtensionAPI) {
 			if (stateFor(state.name) !== state || !canClearAgent(state.status, false)) { skipped.push(state.name); continue; }
 			clearAgent(state); cleared.push(state.name);
 		}
-		ctx.ui.notify([`cleared: ${cleared.join(", ") || "none"}`, `skipped: ${skipped.join(", ") || "none"}`].join("\n"), "success");
+		ctx.ui.notify([`cleared: ${cleared.join(", ") || "none"}`, `skipped: ${skipped.join(", ") || "none"}`].join("\n"), "info");
 	}
 
 	pi.registerTool({ name: "dispatch_agent", label: "Dispatch Agent", description: "Dispatch or steer a named dynamic team instance. Results return privately for one host response.", parameters: Type.Object({ agent: Type.String({ description: "Unique dynamic instance name" }), task: Type.String({ description: "Focused task" }) }),
@@ -812,9 +816,9 @@ export default function (pi: ExtensionAPI) {
 				const [action, id, field, ...value] = rest;
 				if (!action) return void ctx.ui.notify(routingQueue.map(item => `${item.id} · ${item.type}${item.instance ? `/${item.instance}` : ""} · ${item.approved ? "approved" : "unapproved"} · ${item.task}`).join("\n") || "Queue is empty", "info");
 				const item = routingQueue.find(candidate => candidate.id === id);
-				if (action === "remove" && item && rest.length === 2) { routingQueue = removeQueuedItem(routingQueue, item.id)!; persistRouting(); ctx.ui.notify("Queued task removed", "success"); return; }
-				if (action === "edit" && item && field === "task" && value.length) { routingQueue = updateQueuedItem(routingQueue, item.id, candidate => ({ ...candidate, task: value.join(" ") }))!; persistRouting(); ctx.ui.notify("Queued task updated", "success"); return; }
-				if (action === "edit" && item && field === "target" && value.length <= 2) { const def = predefinedDefinition(value[0] || ""); if (!def) return void ctx.ui.notify("Queue target must be a predefined base type", "error"); routingQueue = updateQueuedItem(routingQueue, item.id, candidate => ({ ...candidate, type: def.name, instance: value[1] }))!; persistRouting(); ctx.ui.notify("Queued target updated", "success"); return; }
+				if (action === "remove" && item && rest.length === 2) { routingQueue = removeQueuedItem(routingQueue, item.id)!; persistRouting(); ctx.ui.notify("Queued task removed", "info"); return; }
+				if (action === "edit" && item && field === "task" && value.length) { routingQueue = updateQueuedItem(routingQueue, item.id, candidate => ({ ...candidate, task: value.join(" ") }))!; persistRouting(); ctx.ui.notify("Queued task updated", "info"); return; }
+				if (action === "edit" && item && field === "target" && value.length <= 2) { const def = predefinedDefinition(value[0] || ""); if (!def) return void ctx.ui.notify("Queue target must be a predefined base type", "error"); routingQueue = updateQueuedItem(routingQueue, item.id, candidate => ({ ...candidate, type: def.name, instance: value[1] }))!; persistRouting(); ctx.ui.notify("Queued target updated", "info"); return; }
 				return void ctx.ui.notify("Usage: /agents queue [edit <id> task <text>|edit <id> target <type> [instance]|remove <id>]", "error");
 			}
 			if (command === "fast") {
