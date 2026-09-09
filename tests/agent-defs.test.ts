@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
-import { canClearAgent, canCompactAgent, canSteerAgent, formatAgentModelLabel, formatToolActivity, latestChildActivity, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, readChildSession, resultDeliveryStatus, rootTools, runConcurrent, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
+import { canClearAgent, canCompactAgent, canSteerAgent, formatAgentModelLabel, formatToolActivity, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, readChildSession, resultDeliveryStatus, runConcurrent, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
 import { ActivityLog } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-activity.ts";
@@ -16,7 +16,6 @@ assert.deepEqual(parseTeams("flat:\n  - planner\n  - builder\nrooted:\n  main: u
 assert.deepEqual(parseTeams(readFileSync("dotfiles/agents/.pi/agent/agents/teams.yaml", "utf8"))["understand-iterate"], {
 	root: "understand", members: ["iterate"],
 });
-assert.deepEqual(rootTools(["read", "bash", "grep"], ["dispatch_agent", "set_agent_model", "read"]), ["read", "bash", "grep", "dispatch_agent", "set_agent_model"]);
 assert.equal(resultDeliveryStatus("done", true), "waiting");
 assert.equal(resultDeliveryStatus("error", true), "waiting");
 assert.equal(resultDeliveryStatus("error", false), "error");
@@ -149,7 +148,6 @@ assert.deepEqual(recovered.map(({ kind, text }) => [kind, text]), [
 	["tool-done", "Read src/main.ts · 1s"],
 	["tool-error", "Write — denied"],
 ], "recovery collapses matched calls, preserves pending starts, and retains unmatched failures");
-assert.deepEqual(ActivityLog.parse(latestChildActivity(childSession)).list().map(({ kind, text }) => [kind, text]), recovered.map(({ kind, text }) => [kind, text]));
 rmSync(sessionDir, { recursive: true, force: true });
 const compactDetail = renderDetail({
 	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "done",

@@ -13,10 +13,6 @@ import { cleanActivity } from "./lib/agent-activity.ts";
  */
 export default function (_pi: ExtensionAPI): void {}
 
-export function rootTools(hostTools: string[], teamTools: string[]): string[] {
-	return [...new Set([...hostTools, ...teamTools])];
-}
-
 export function parseTellArguments(value: string): { agent: string; message: string } | undefined {
 	const match = value.trim().match(/^(\S+)\s+([\s\S]*\S)$/);
 	return match ? { agent: match[1], message: match[2] } : undefined;
@@ -59,8 +55,6 @@ export function nextAgentName(base: string, existingNames: Iterable<string>): st
 	while (existing.has(`${normalizedBase}-${suffix}`)) suffix++;
 	return `${normalizedBase}-${suffix}`;
 }
-
-export const isAgentReturning = (status: string): boolean => status === "waiting";
 
 export type AgentOrigin = "default" | "user" | "host";
 export type TaskHistoryEntry = { task: string; outcome: AgentCompletionStatus };
@@ -244,35 +238,6 @@ export function contextTokensFromUsage(usage: unknown): number | undefined {
 	return parts.length > 0 ? parts.reduce((sum, value) => sum + Math.max(0, value), 0) : undefined;
 }
 
-export function latestAssistantContextTokens(sessionFile: string): number | undefined {
-	if (!existsSync(sessionFile)) return undefined;
-	let latest: number | undefined;
-	for (const line of readFileSync(sessionFile, "utf-8").split("\n")) {
-		try {
-			const entry = JSON.parse(line);
-			if (entry?.type !== "message" || entry.message?.role !== "assistant") continue;
-			const tokens = contextTokensFromUsage(entry.message.usage);
-			if (tokens !== undefined) latest = tokens;
-		} catch {}
-	}
-	return latest;
-}
-
-export function sessionTokenCounts(sessionFile: string): TokenCounts {
-	if (!existsSync(sessionFile)) return { input: 0, output: 0 };
-	let total: TokenCounts = { input: 0, output: 0 };
-	for (const line of readFileSync(sessionFile, "utf-8").split("\n")) {
-		try {
-			const entry = JSON.parse(line);
-			const usage = entry?.type === "message" && (entry.message?.role === "assistant" || entry.message?.role === "toolResult")
-				? entry.message.usage
-				: entry?.type === "compaction" || entry?.type === "branch_summary" ? entry.usage : undefined;
-			total = addTokenCounts(total, tokenCountsFromUsage(usage));
-		} catch {}
-	}
-	return total;
-}
-
 // Same normalisation as everywhere else; see lib/agent-activity.ts for the single definition.
 const cleanActivityText = cleanActivity;
 const shortActivityText = (value: unknown, max = 180) => {
@@ -296,33 +261,6 @@ export function formatToolActivity(name: unknown, args: unknown): string {
 const activityToolRecord = (toolCallId: unknown, text: string) =>
 	typeof toolCallId === "string" && toolCallId ? `${toolCallId}\t${text}` : text;
 
-/** Compact, safe timeline recovered from a child Pi JSONL session. */
-export function latestChildActivity(sessionFile: string, maxEntries = 24): string {
-	if (!existsSync(sessionFile)) return "";
-	const entries: string[] = []; const calls = new Map<string, { summary: string; timestamp?: number }>();
-	for (const line of readFileSync(sessionFile, "utf-8").split("\n")) {
-		try {
-			const entry = JSON.parse(line); const message = entry?.message; if (!message) continue;
-			const timestamp = Date.parse(entry.timestamp ?? message.timestamp ?? "") || undefined;
-			if (message.role === "user") {
-				const text = typeof message.content === "string" ? message.content : Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join(" ") : "";
-				if (text) entries.push(`user: ${shortActivityText(text)}`);
-			} else if (message.role === "assistant") {
-				if (typeof message.content === "string" && message.content) entries.push(`assistant: ${shortActivityText(message.content)}`);
-				for (const part of Array.isArray(message.content) ? message.content : []) {
-					if (part?.type === "text" && part.text) entries.push(`assistant: ${shortActivityText(part.text)}`);
-					if (part?.type === "toolCall") { const summary = formatToolActivity(part.name, part.arguments); if (typeof part.id === "string" && part.id) calls.set(part.id, { summary, timestamp }); entries.push(`tool-start: ${activityToolRecord(part.id, summary)}`); }
-				}
-			} else if (message.role === "toolResult") {
-				const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : undefined; const call = toolCallId ? calls.get(toolCallId) : undefined; const elapsed = call?.timestamp && timestamp ? ` · ${Math.max(0, Math.round((timestamp - call.timestamp) / 1000))}s` : "";
-				const error = message.isError ? ` — ${shortActivityText(Array.isArray(message.content) ? message.content.find((part: any) => part?.type === "text")?.text : message.content, 96)}` : "";
-				entries.push(`${message.isError ? "tool-error" : "tool-done"}: ${activityToolRecord(toolCallId, `${call?.summary ?? formatToolActivity(message.toolName, {})}${elapsed}${error}`)}`);
-			}
-		} catch {}
-	}
-	return entries.slice(-maxEntries).join("\n").slice(-5000);
-}
-
 /** Everything makeState needs from a child transcript, recovered in one pass. */
 export interface ChildSessionSnapshot {
 	activity: string;
@@ -331,12 +269,13 @@ export interface ChildSessionSnapshot {
 }
 
 /**
- * Read a child session once instead of three times.
+ * The only reader of a child transcript.
  *
- * latestChildActivity, latestAssistantContextTokens and sessionTokenCounts each did their own
- * readFileSync + JSON.parse of the same file, and makeState called all three per instance — so a
- * restored team re-parsed every transcript three times at session_start. Those functions remain
- * for callers that want a single value; this is the combined path.
+ * The timeline, the last assistant context size and the token totals each used to live in their
+ * own exported function with its own readFileSync + JSON.parse of the same file, and makeState
+ * called all three per instance — so a restored team re-parsed every transcript three times at
+ * session_start. Keeping them as separate entry points also meant two copies of the same
+ * message-shape handling that had to be kept in step by a test asserting they agreed.
  */
 export function readChildSession(sessionFile: string, maxEntries = 24): ChildSessionSnapshot {
 	const empty: ChildSessionSnapshot = { activity: "", contextTokens: undefined, tokens: { input: 0, output: 0 } };
@@ -358,7 +297,7 @@ export function readChildSession(sessionFile: string, maxEntries = 24): ChildSes
 		try {
 			const entry = JSON.parse(line);
 
-			// -- token totals (was sessionTokenCounts) --
+			// -- token totals --
 			const usage = entry?.type === "message" && (entry.message?.role === "assistant" || entry.message?.role === "toolResult")
 				? entry.message.usage
 				: entry?.type === "compaction" || entry?.type === "branch_summary" ? entry.usage : undefined;
@@ -367,13 +306,13 @@ export function readChildSession(sessionFile: string, maxEntries = 24): ChildSes
 			const message = entry?.message;
 			if (!message) continue;
 
-			// -- last assistant context size (was latestAssistantContextTokens) --
+			// -- last assistant context size --
 			if (entry.type === "message" && message.role === "assistant") {
 				const latest = contextTokensFromUsage(message.usage);
 				if (latest !== undefined) contextTokens = latest;
 			}
 
-			// -- timeline (was latestChildActivity) --
+			// -- timeline --
 			const timestamp = Date.parse(entry.timestamp ?? message.timestamp ?? "") || undefined;
 			if (message.role === "user") {
 				const text = typeof message.content === "string" ? message.content : Array.isArray(message.content) ? message.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join(" ") : "";

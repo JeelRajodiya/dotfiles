@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
 	appendTaskHistory, addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, decideRouting, canClearAgent, canCompactAgent, canInterruptAgent, canKillHostAgent, canSteerAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
-	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, latestChildActivity, readChildSession,
+	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, readChildSession,
 	nextAgentName, OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, removeQueuedItem, resultDeliveryStatus, restoreNextWaitingAgent, runConcurrent, shouldIgnoreAgentRunEvent, updateQueuedItem,
 	restoreWaitingAgents, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
 	terminateChild, type AgentCompletionStatus, type AgentOrigin, type TaskHistoryEntry, type TokenCounts,
@@ -406,7 +406,7 @@ export default function (pi: ExtensionAPI) {
 		state.status = "running"; state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); state.toolCount = 0; state.elapsed = 0; state.lastWork = "";
 		// Maintenance runs (compaction) must not enter the transcript as a task the agent was given.
 		if (options.record === false) state.task = "Compacting";
-		else { state.task = task; state.activity = ActivityLog.parse(latestChildActivity(sessionPath(state))); state.activity.append("user", task); state.runCount++; }
+		else { state.task = task; state.activity = ActivityLog.parse(readChildSession(sessionPath(state)).activity); state.activity.append("user", task); state.runCount++; }
 		// Ticks at frame rate so the spinner turns; updateWidget throttles the actual repaints.
 		const startTime = Date.now(); clearInterval(state.timer); state.timer = setInterval(() => { state.elapsed = Date.now() - startTime; updateWidget(); }, FRAME_MS);
 		state.timer.unref?.();

@@ -108,8 +108,10 @@ export class ActivityLog {
 	finishTool(toolCallId: string | undefined, kind: "tool-done" | "tool-error", value: unknown): void {
 		const text = cleanActivity(value);
 		if (!text) return;
+		// findLast, not a reversed copy: this runs once per tool result, and a long run makes
+		// thousands of them.
 		const pending = toolCallId
-			? [...this.entries].reverse().find(entry => entry.kind === "tool-start" && entry.toolCallId === toolCallId)
+			? this.entries.findLast(entry => entry.kind === "tool-start" && entry.toolCallId === toolCallId)
 			: undefined;
 		if (pending) {
 			pending.kind = kind;
@@ -161,7 +163,7 @@ export class ActivityLog {
 		for (const thought of this.openThoughts()) thought.finishedAt = now;
 	}
 
-	/** Rebuild from the `kind: text` lines that latestChildActivity() recovers from a session file. */
+	/** Rebuild from the `kind: text` lines that readChildSession() recovers from a session file. */
 	static parse(serialized: string, maxEntries?: number, maxTextLength?: number): ActivityLog {
 		const log = new ActivityLog(maxEntries, maxTextLength);
 		for (const line of serialized.split("\n")) {
