@@ -1,6 +1,6 @@
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { OPENAI_FAST_ENV, parseOpenAIFastEnvValue } from "./agent-team-helpers.ts";
 
 const preferenceFile = join(getAgentDir(), "states", "openai-fast.json");
@@ -54,6 +54,9 @@ export default function openAICodexFast(pi: ExtensionAPI) {
 			}
 			const next = value ? value === "on" : !enabled;
 			try {
+				// states/ does not exist in a fresh agent dir, and without this the first /fast
+				// only ever reported ENOENT.
+				mkdirSync(dirname(preferenceFile), { recursive: true });
 				writeFileSync(preferenceFile, `${JSON.stringify({ enabled: next })}\n`);
 			} catch (error) {
 				ctx.ui.notify(`Cannot save fast-mode preference: ${String(error)}`, "error");
