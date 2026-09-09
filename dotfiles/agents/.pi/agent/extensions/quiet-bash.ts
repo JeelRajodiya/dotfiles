@@ -9,7 +9,6 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
-// Resolved against the configured agent dir rather than a hardcoded ~/.pi.
 const bgTasks = (...parts: string[]) => pathToFileURL(join(
 	getAgentDir(),
 	"npm/node_modules/pi-bg-tasks/extensions/bg-tasks",
@@ -17,9 +16,7 @@ const bgTasks = (...parts: string[]) => pathToFileURL(join(
 )).href;
 
 export default async function (pi: ExtensionAPI) {
-	// Reaches into another package's internals, so a version bump or a missing install can move
-	// them. Fail soft like ponytail.ts: a throw here would take down every tool this extension
-	// registers, leaving the session with no bash tool at all.
+	// Fail soft like ponytail.ts: a throw here would leave the session with no bash tool at all.
 	let registry: any, lifecycle: any, bashTools: any, taskTools: any, ui: any;
 	try {
 		[registry, lifecycle, bashTools, taskTools, ui] = await Promise.all([

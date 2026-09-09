@@ -1,11 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadSessions } from "./lib/session-cost.ts";
 
-/**
- * Session timestamps are ISO-8601 in UTC, so the month prefix has to be built in UTC too.
- * Building it from getFullYear()/getMonth() compared a local month against a UTC stamp, which
- * mislabels every entry recorded in the hours around a month boundary.
- */
+/** UTC: record.iso is a UTC stamp, so a local-time prefix misfiles entries near a boundary. */
 export function monthPrefix(now = new Date()): string {
 	return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 }

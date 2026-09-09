@@ -54,8 +54,6 @@ export default function openAICodexFast(pi: ExtensionAPI) {
 			}
 			const next = value ? value === "on" : !enabled;
 			try {
-				// states/ does not exist in a fresh agent dir, and without this the first /fast
-				// only ever reported ENOENT.
 				mkdirSync(dirname(preferenceFile), { recursive: true });
 				writeFileSync(preferenceFile, `${JSON.stringify({ enabled: next })}\n`);
 			} catch (error) {

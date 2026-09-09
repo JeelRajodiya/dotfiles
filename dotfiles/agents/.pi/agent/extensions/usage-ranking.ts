@@ -215,9 +215,7 @@ class ModelPicker implements Component, Focusable {
 	private readonly keybindings: KeybindingsManager;
 	private readonly done: (model?: Model<any>) => void;
 
-	// Plain fields, not constructor parameter properties: Node's strip-only TypeScript mode
-	// rejects those, which made this whole module unimportable from tests/ — see the same note
-	// in lib/agent-activity.ts.
+	// Plain fields: Node's strip-only TypeScript mode rejects parameter properties.
 	constructor(
 		models: Model<any>[],
 		stats: MonthlyStats,

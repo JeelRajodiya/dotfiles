@@ -293,8 +293,6 @@ export default function (pi: ExtensionAPI) {
 		state.contextTokens = 0;
 		state.tokens = { input: 0, output: 0 };
 		state.activity = new ActivityLog();
-		// The delegation catalog reads history: a cleared agent that still advertises completed
-		// tasks tells the host it has context it no longer has.
 		state.history = [];
 		state.runCount = 0;
 		state.task = "";
@@ -399,8 +397,6 @@ export default function (pi: ExtensionAPI) {
 		updateWidget();
 		syncStatus();
 		if (queuedForDelivery) {
-			// OutputBuffer stops at its cap; say so, rather than handing the host a silently
-			// clipped answer it will read as complete.
 			const truncated = run.output.wasTruncated ? "\n\n(child output truncated)" : "";
 			const result = error ? error.message : output ? `${output}${truncated}` : "(no output)";
 			pi.sendMessage({ customType: "agent-team-result", content: `Private result from ${state.name} (${state.def.name}) for ${run.initialTask}:\n${result}`, display: false, details: { agent: state.name, status: outcome, elapsed: state.elapsed } }, { deliverAs: "followUp", triggerTurn: true });
@@ -584,9 +580,7 @@ export default function (pi: ExtensionAPI) {
 		if (drainingQueue || !ctx.isIdle()) return;
 		drainingQueue = true;
 		try {
-			// Snapshot the ids: routeTask awaits, and /agents queue edit|remove reassigns
-			// routingQueue while it does, so an index captured before the await can point at a
-			// different task by the time it is removed.
+			// routeTask awaits, and /agents queue edit|remove reassigns routingQueue meanwhile.
 			for (const id of routingQueue.map(item => item.id)) {
 				const item = routingQueue.find(candidate => candidate.id === id);
 				if (!item) continue;
@@ -689,12 +683,7 @@ export default function (pi: ExtensionAPI) {
 	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | interrupt <agent> | clear <subagent-name> | clear-all-sub | remove <name> | compact <name> | compact-all-sub | promote <instance|base> | demote | list | model <name> [model|inherit] | fast <name> [on|off] | auto-spawn <on|off|limit N> | queue [edit <id> <task|target> ...|remove <id>] | view <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
-	/**
-	 * The instance list a replacement session should start from. It has to match what
-	 * activateTeam/addDefaultAgent would build in place — same auto-suffixed names, same
-	 * default ownership, a fresh session key each — or switching teams by forking produces a
-	 * differently named, differently owned team than switching teams in place.
-	 */
+	/** Seed for a replacement session; must match what activateTeam builds in place. */
 	const teamSnapshot = (teamName: string | undefined): SavedTeam => {
 		const team = teamName ? teams[teamName] : undefined;
 		const instances: SavedInstance[] = [];
@@ -985,10 +974,7 @@ export default function (pi: ExtensionAPI) {
 			}));
 			agentAutocompleteInstalled = true;
 		}
-		// Pi carries the active tool list across a session reload, so a previous session's
-		// narrowing survives into this one. Give the host its tools back before re-reading them:
-		// clearing the capture without restoring first would leave a team-less session stranded
-		// on the six team tools, with no read, edit, or bash.
+		// Pi carries active tools across a reload, so undo last session's narrowing before recapturing.
 		if (hostTools) pi.setActiveTools(hostTools);
 		widgetCtx = ctx; parentSessionId = ctx.sessionManager.getSessionId(); viewedAgent = undefined; hostTools = undefined; rootModelRestored = true; hostBusy = !ctx.isIdle(); pendingDeliveries.length = 0; loadAgents(ctx.cwd);
 		agentModelOverrides.clear();

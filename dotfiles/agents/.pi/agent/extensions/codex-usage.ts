@@ -2,8 +2,6 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-// Resolve against the configured agent dir like every other extension here; a hardcoded
-// ~/.pi/agent silently reads the wrong auth file when PI_AGENT_DIR moves it.
 const AUTH_FILE = join(getAgentDir(), "auth.json");
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 

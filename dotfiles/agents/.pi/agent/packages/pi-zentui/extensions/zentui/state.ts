@@ -72,8 +72,7 @@ export function syncState(
 	telemetry: FooterTelemetry = {},
 ): void {
 	const totals = getUsageTotals(ctx);
-	// One pass over the transcript: this runs on every footer refresh, and walking the whole
-	// entry list twice for two independent lookups showed up on long sessions.
+	// One call: getEntries() filters and allocates the whole entry list, on every footer refresh.
 	const entries = ctx.sessionManager.getEntries();
 	const seenSubagentUsage = new Set<string>();
 	let subagentCost = 0;
@@ -87,7 +86,6 @@ export function syncState(
 			const cost = data.usage?.cost?.total;
 			if (typeof cost === "number" && Number.isFinite(cost)) subagentCost += cost;
 		} else if (entry.customType === "openai-fast") {
-			// Last one wins, matching the previous findLast.
 			fastEnabled = (entry.data as { enabled?: boolean } | undefined)?.enabled === true;
 		}
 	}

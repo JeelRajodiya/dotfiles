@@ -236,9 +236,7 @@ export default function (pi: ExtensionAPI) {
 	let accentRailLayoutPatchInstallSerial = 0;
 	let cleanupThinkingTimer: () => void = () => {};
 	let hostTokenBase = { input: 0, output: 0 };
-	// Installed per session, like every other patch here. Installing once at extension load and
-	// tearing down on session_shutdown left the timer dead for every session after the first in
-	// the same process.
+	// Per session, like every other patch here: session_shutdown tears it down.
 	const reinstallThinkingTimer = () => {
 		cleanupThinkingTimer();
 		cleanupThinkingTimer = () => {};
@@ -1367,8 +1365,6 @@ export default function (pi: ExtensionAPI) {
 	});
 	pi.on("agent_end", (event, ctx) => {
 		liveContext.clear();
-		// An aborted or failed turn never sends a final non-streaming update, so its label would
-		// otherwise keep counting up as "Thinking (…)" for the rest of the session.
 		settleThinkingTimers();
 		const displayTokens = interactionMetrics.currentDisplayTokens();
 		interactionMetrics.agentEnd();
