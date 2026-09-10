@@ -7,7 +7,7 @@
  * clear one batch when the live total crosses the ceiling, down to the floor, then hold.
  */
 
-const APPROX_CHARS_PER_TOKEN = 4;
+export const APPROX_CHARS_PER_TOKEN = 4;
 /** An image costs roughly this much however long its base64 happens to be. */
 const APPROX_IMAGE_TOKENS = 1_500;
 

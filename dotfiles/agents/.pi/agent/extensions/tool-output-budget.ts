@@ -1,11 +1,20 @@
 /**
- * Drops stale tool output from the context sent to the model.
+ * Keeps tool output from eating the context window, in two places.
  *
- * transformContext only rewrites the outgoing request — the session on disk keeps every byte, so
- * /agents view and the transcript are unaffected and nothing here is recoverable-only-once.
+ * `tool_result` reshapes one oversized result as it lands: pi's tools keep one end, so the other is
+ * already on disk or still on the filesystem and can be recovered and re-cut down the middle.
+ * `context` drops results the agent finished with turns ago. transformContext only rewrites the
+ * outgoing request — the session on disk keeps every byte, so the transcript is unaffected.
  */
+import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { clearedPlaceholder, estimateResultTokens, planClears, type ToolOutputResult } from "./lib/tool-output-budget.ts";
+import { middleOutFile, withTruncationNotice } from "./lib/tool-output-shape.ts";
+
+interface TruncatedDetails {
+	truncation?: { truncated?: boolean };
+	fullOutputPath?: string;
+}
 
 export default function toolOutputBudget(pi: ExtensionAPI) {
 	// Keyed by tool call rather than position: compaction renumbers history, and a result that has
@@ -14,6 +23,23 @@ export default function toolOutputBudget(pi: ExtensionAPI) {
 	pi.on("session_start", () => {
 		cleared = new Set();
 	});
+
+	pi.on("tool_result", async (event, ctx) => {
+		const details = event.details as TruncatedDetails | undefined;
+		if (!details?.truncation?.truncated) return;
+		const input = event.input as { path?: string; offset?: number; limit?: number };
+		// bash persists what it dropped; read can be re-read from source — but only when the model
+		// asked for the whole file. An explicit offset/limit is a request for that slice, not a cap.
+		const source = details.fullOutputPath
+			?? (typeof input.path === "string" && input.offset === undefined && input.limit === undefined
+				? resolve(ctx.cwd, input.path)
+				: undefined);
+		if (!source) return;
+		const shaped = await middleOutFile(source);
+		if (!shaped?.truncated) return;
+		return { content: [{ type: "text" as const, text: withTruncationNotice(shaped, details.fullOutputPath) }] };
+	});
+
 	pi.on("context", event => {
 		const results = event.messages.filter(message => message.role === "toolResult") as unknown as ToolOutputResult[];
 		if (!results.length) return;

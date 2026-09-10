@@ -48,3 +48,43 @@ assert.ok(!planClears(tiny, new Set()).includes("tiny"), "a 50-token result is n
 assert.match(clearedPlaceholder("bash", 12_000), /bash output cleared to save context \(~12000 tokens\)/);
 assert.ok(CLEAR_ABOVE_TOKENS > KEEP_TOKENS, "ceiling above floor, or clearing would run every turn");
 console.log("PASS: stale tool output is cleared in stable batches");
+
+// --- reshaping one oversized result (the Codex shape: both ends kept, middle dropped)
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { TOOL_OUTPUT_TOKEN_BUDGET, middleOut, middleOutFile, withTruncationNotice } from "../dotfiles/agents/.pi/agent/extensions/lib/tool-output-shape.ts";
+
+const short = middleOut("hello\nworld\n");
+assert.equal(short.truncated, false, "output under budget is passed through untouched");
+assert.equal(short.text, "hello\nworld\n");
+
+const lines = Array.from({ length: 40_000 }, (_, i) => `line ${i}`).join("\n");
+const shaped = middleOut(lines);
+assert.ok(shaped.truncated, "output over budget is cut");
+assert.ok(shaped.text.startsWith("line 0\n"), "the head survives — pi's bash truncation drops this");
+assert.ok(shaped.text.trimEnd().endsWith("line 39999"), "the tail survives — pi's read truncation drops this");
+assert.match(shaped.text, /…\d+ tokens truncated…/, "the gap is marked");
+assert.ok(shaped.text.length < lines.length / 4, "and the result actually fits the budget");
+
+const dir = mkdtempSync(join(tmpdir(), "tool-output-"));
+try {
+	const big = join(dir, "big.log");
+	writeFileSync(big, lines);
+	const fromDisk = await middleOutFile(big);
+	assert.ok(fromDisk?.truncated, "a file over budget is cut without loading all of it");
+	assert.ok(fromDisk.text.startsWith("line 0\n") && fromDisk.text.trimEnd().endsWith("line 39999"), "both ends come off disk");
+	assert.ok(fromDisk.originalTokens > TOOL_OUTPUT_TOKEN_BUDGET, "and the original size is reported");
+
+	const small = join(dir, "small.log");
+	writeFileSync(small, "just a little output\n");
+	assert.equal((await middleOutFile(small))?.truncated, false, "a small file is returned whole");
+	assert.equal(await middleOutFile(join(dir, "missing.log")), undefined, "a vanished temp file is not an error");
+} finally {
+	rmSync(dir, { recursive: true, force: true });
+}
+
+assert.match(withTruncationNotice(shaped), /Warning: truncated output \(original token count: \d+\)/);
+assert.match(withTruncationNotice(shaped, "/tmp/pi-output-x.log"), /Full output: \/tmp\/pi-output-x\.log/);
+assert.equal(withTruncationNotice(short), short.text, "no notice when nothing was dropped");
+console.log("PASS: oversized results keep both ends and report what was dropped");
