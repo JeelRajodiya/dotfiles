@@ -63,9 +63,19 @@ export function formatActivityDuration(durationMs: number): string {
 	return minutes ? `${minutes}m${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
 }
 
+/** A row still in flight. The live counter in front of it is the only thing that says so. */
+export const isActivityRunning = (entry: ActivityEntry): boolean =>
+	entry.kind === "tool-start" || (entry.kind === "thought" && entry.finishedAt === undefined);
+
+/** Where its clock started: tools only carry `at`, thoughts carry an explicit start. */
+export const activityStartedAt = (entry: ActivityEntry): number | undefined => entry.startedAt ?? entry.at;
+
 export function thoughtActivityLabel(entry: ActivityEntry, now = Date.now()): string {
-	const duration = Math.max(0, (entry.finishedAt ?? now) - (entry.startedAt ?? now));
-	return `${entry.finishedAt ? "Thought" : "Thinking"} (${formatActivityDuration(duration)})${entry.text ? ` — ${entry.text}` : ""}`;
+	// A running thought is rendered behind a live counter, so repeating the elapsed time here
+	// would read "12s Thinking (12s) — …".
+	if (entry.finishedAt === undefined) return `Thinking${entry.text ? ` — ${entry.text}` : ""}`;
+	const duration = Math.max(0, entry.finishedAt - (entry.startedAt ?? entry.finishedAt));
+	return `Thought (${formatActivityDuration(duration)})${entry.text ? ` — ${entry.text}` : ""}`;
 }
 
 export class ActivityLog {

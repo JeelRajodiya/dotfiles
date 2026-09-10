@@ -4,7 +4,7 @@
  */
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatAgentModelLabel, formatAgentContext, formatAgentTokens, type TokenCounts } from "../agent-team-helpers.ts";
-import { thoughtActivityLabel, type ActivityEntry } from "./agent-activity.ts";
+import { activityStartedAt, formatActivityDuration, isActivityRunning, thoughtActivityLabel, type ActivityEntry } from "./agent-activity.ts";
 
 export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
 
@@ -35,6 +35,9 @@ export const FRAME_MS = 80;
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const STATUS_ICON: Record<string, string> = { waiting: "↗", done: "✓", error: "✗", idle: "○" };
 const STATUS_COLOR: Record<string, string> = { running: "accent", waiting: "warning", done: "success", error: "error", idle: "dim" };
+/** Live counters get a colour nothing else in the pane uses, so an in-flight row is findable
+ * without reading it. A running command and a finished one are otherwise the same dim line. */
+const LIVE_COLOR = "warning";
 const ACTIVITY_COLOR: Record<string, string> = { user: "accent", assistant: "text", thought: "muted", "tool-start": "dim", "tool-done": "success", "tool-error": "error" };
 
 type Theme = { fg(color: string, text: string): string; bold(text: string): string };
@@ -127,6 +130,15 @@ export function renderThoughtActivity(entry: ActivityEntry, width: number, now?:
 	return truncateToWidth(thoughtActivityLabel(entry, now).replace(/\s+/g, " ").trim(), width, "…");
 }
 
+/** One activity row. In-flight rows lead with a live elapsed counter; finished rows do not. */
+export function renderActivityLine(entry: ActivityEntry, width: number, theme: Theme, now = Date.now()): string {
+	const body = (entry.kind === "thought" ? thoughtActivityLabel(entry, now) : entry.text).replace(/\s+/g, " ").trim();
+	const color = entry.kind === "assistant" ? "text" : (ACTIVITY_COLOR[entry.kind] ?? "muted");
+	if (!isActivityRunning(entry)) return theme.fg(color, truncateToWidth(body, width, "…"));
+	const counter = formatActivityDuration(Math.max(0, now - (activityStartedAt(entry) ?? now)));
+	return `${theme.fg(LIVE_COLOR, counter)} ${theme.fg(color, truncateToWidth(body, Math.max(1, width - visibleWidth(counter) - 1), "…"))}`;
+}
+
 /** The expanded single-agent view behind `/agents view <name>`, where prose has room. */
 export function renderDetail(agent: RenderableAgent, width: number, theme: Theme, options: DetailOptions, now?: number): string {
 	const line = (value: string) => truncateToWidth(value, width);
@@ -140,12 +152,7 @@ export function renderDetail(agent: RenderableAgent, width: number, theme: Theme
 		`${Math.round(agent.elapsed / 1000)}s`,
 	].join(" · ");
 
-	const activity = options.activity.map(entry =>
-		entry.kind === "thought"
-			? theme.fg("muted", renderThoughtActivity(entry, width, now))
-			: theme.fg(entry.kind === "assistant" ? "text" : (ACTIVITY_COLOR[entry.kind] ?? "muted"),
-				truncateToWidth(entry.text.replace(/\s+/g, " ").trim(), width, "…")),
-	);
+	const activity = options.activity.map(entry => renderActivityLine(entry, width, theme, now));
 
 	return [
 		line(`${theme.fg(statusColor(agent.status), statusGlyph(agent.status, now))} ${agentHeading(agent, theme)}  ${theme.fg(contextColor(agent), context)}`),

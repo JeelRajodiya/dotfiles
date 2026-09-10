@@ -170,7 +170,7 @@ const compactDetail = renderDetail({
 	],
 }, 0);
 const compactRows = compactDetail.split("\n");
-assert.equal(compactRows.filter(row => /assistant row continued|Thinking \(0s\) — thought row|git status --short|tool done row|tool error row/.test(row)).length, 5);
+assert.equal(compactRows.filter(row => /assistant row continued|Thought \(0s\) — thought row|git status --short|tool done row|tool error row/.test(row)).length, 5);
 assert.equal(compactRows.some(row => row.includes("◆") || row.includes("bash — command:")), false);
 assert.equal(compactRows.every(row => visibleWidth(row) <= 40), true);
 assert.equal(compactRows.some(row => row.includes("…")), true);
