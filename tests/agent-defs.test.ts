@@ -73,6 +73,9 @@ assert.equal(formatAgentModelLabel("openai-codex/gpt-5.6-sol", true), "gpt-5.6-s
 assert.equal(formatAgentModelLabel("anthropic/claude-4", true), "claude-4");
 
 const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+// The cards render the display form too, not just the detail pane.
+const card = renderCard({ name: "tracer-b", def: { name: "tracer", description: "" }, goal: "", task: "", status: "idle", toolCount: 0, elapsed: 0, contextTokens: 0, contextWindow: 500_000, tokens: { input: 0, output: 0 }, model: "test/model" }, 40, plainTheme, 0).join(" ");
+assert.match(card.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, ""), /Tracer B/, "cards show the spaced, capitalised form");
 const elapsedCard = renderCard({
 	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "done",
 	model: "openai-codex/gpt-5.6-sol", fast: true, thinking: "high", toolCount: 7, elapsed: 12_000, contextTokens: 0,

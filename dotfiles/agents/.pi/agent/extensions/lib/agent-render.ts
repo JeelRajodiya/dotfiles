@@ -83,7 +83,7 @@ export function renderCard(agent: RenderableAgent, width: number, theme: Theme, 
 	const row = (content: string) => theme.fg("dim", "│") + " " + truncateToWidth(content, inner) + " ".repeat(Math.max(0, inner - visibleWidth(content))) + " " + theme.fg("dim", "│");
 
 	const label = agent.name.toLowerCase() === agent.def.name.toLowerCase() ? "" : theme.fg("dim", ` ${agent.def.name}`);
-	const name = `${theme.fg(statusColor(agent.status), statusGlyph(agent.status, now))} ${theme.bold(theme.fg("accent", agent.name))}${label}`;
+	const name = `${theme.fg(statusColor(agent.status), statusGlyph(agent.status, now))} ${theme.bold(theme.fg("accent", displayName(agent.name)))}${label}`;
 	const context = theme.fg(contextColor(agent), formatAgentContext(agent.contextTokens, agent.contextWindow));
 	const waiting = agent.status === "waiting" ? agent.pendingOutcome === "error" ? "return error" : "returning" : "";
 	const elapsed = agent.status === "running" || agent.elapsed ? `${Math.round(agent.elapsed / 1000)}s` : "";
@@ -95,7 +95,7 @@ export function renderCard(agent: RenderableAgent, width: number, theme: Theme, 
 	const model = `${formatAgentModelLabel(agent.model, agent.fast)} · ${agent.thinking ?? "off"}`;
 	const identityWidth = Math.max(1, inner - visibleWidth(vital) - 1);
 	const compactIdentity = visibleWidth(identityLeft) <= identityWidth ? identityLeft
-		: `${theme.fg(statusColor(agent.status), statusGlyph(agent.status, now))} ${theme.bold(theme.fg("accent", truncateToWidth(agent.name, Math.max(1, identityWidth - 2))))}`;
+		: `${theme.fg(statusColor(agent.status), statusGlyph(agent.status, now))} ${theme.bold(theme.fg("accent", truncateToWidth(displayName(agent.name), Math.max(1, identityWidth - 2))))}`;
 	const identity = vital ? spread(compactIdentity, vital, inner) : truncateToWidth(identityLeft, inner);
 	// At three 26-column cards, bare arrows make room for the complete fast model label.
 	const usage = `${visibleWidth(`${tokens} ${model}`) <= inner ? tokens : "↑↓"} ${model}`;
