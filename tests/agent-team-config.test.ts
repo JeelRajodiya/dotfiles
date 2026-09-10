@@ -51,6 +51,9 @@ assert.match(agentTeam, /const DEFAULT_TEAM = "default"/);
 assert.match(agentTeam, /const TEAM_TOOLS = \["dispatch_agent", "peek_agent", "route_agent", "spawn_agent", "kill_agent", "interrupt_agent", "set_agent_model", "get_context_remaining", "new_context"\]/);
 assert.match(agentTeam, /rootAgent \? TEAM_TOOLS : agentStates\.size \? TEAM_TOOLS : undefined/);
 assert.match(agentTeam, /agent-team-routing/);
+// The approval gate has to cover every path into Fixer. route_agent and spawn_agent take an
+// approved flag; dispatch_agent used to take none, so naming the instance directly walked past it.
+assert.equal(agentTeam.match(/=== "fixer" && !approved/g)?.length, 3, "dispatch, route and spawn are all gated");
 // An idle instance has no activeRun to read its level from; it must fall back to its own
 // definition, not to whatever the host happens to be set to.
 assert.match(agentTeam, /state\.activeRun\?\.thinking \?\? resolveAgentThinking\(state\.def\.thinking, widgetCtx\.thinkingLevel\)/);

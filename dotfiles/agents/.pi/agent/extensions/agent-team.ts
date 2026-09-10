@@ -678,8 +678,14 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify([`cleared: ${cleared.join(", ") || "none"}`, `skipped: ${skipped.join(", ") || "none"}`].join("\n"), "info");
 	}
 
-	pi.registerTool({ name: "dispatch_agent", label: "Dispatch Agent", description: "Dispatch or steer a named dynamic team instance. Results return privately for one host response.", parameters: Type.Object({ agent: Type.String({ description: "Unique dynamic instance name" }), task: Type.String({ description: "Focused task" }) }),
-		async execute(_id, params, _signal, _update, ctx) { const { agent, task } = params as { agent: string; task: string }; const submitted = await submitAgent(agent, task, ctx); return { content: [{ type: "text", text: `${displayName(agent)} ${submitted.status === "steered" ? "steering accepted" : "is working in the background"}.` }], details: { agent, status: submitted.status } }; },
+	pi.registerTool({ name: "dispatch_agent", label: "Dispatch Agent", description: "Dispatch or steer a named dynamic team instance. Results return privately for one host response.", parameters: Type.Object({ agent: Type.String({ description: "Unique dynamic instance name" }), task: Type.String({ description: "Focused task" }), approved: Type.Optional(Type.Boolean({ description: "Required for implementation work; true only after explicit user approval" })) }),
+		async execute(_id, params, _signal, _update, ctx) {
+			const { agent, task, approved } = params as { agent: string; task: string; approved?: boolean };
+			// The gate lives here rather than in submitAgent: /agents tell and steering a viewed agent
+			// go through the same call, and those are the user acting directly.
+			const target = stateFor(agent);
+			if (target && key(target.def.name) === "fixer" && !approved) throw new Error("Fixer tasks require explicit user approval before dispatch or queueing");
+			const submitted = await submitAgent(agent, task, ctx); return { content: [{ type: "text", text: `${displayName(agent)} ${submitted.status === "steered" ? "steering accepted" : "is working in the background"}.` }], details: { agent, status: submitted.status } }; },
 		renderCall(args, theme) { const task = (args as any).task || ""; return new Text(theme.fg("toolTitle", theme.bold("dispatch_agent ")) + theme.fg("accent", (args as any).agent || "?") + theme.fg("dim", ` — ${task.slice(0, 60)}`), 0, 0); },
 		renderResult(result, _options, theme) { const details = result.details as any; return new Text(theme.fg("accent", `● ${details?.agent || "agent"}`) + theme.fg("dim", details?.status === "steered" ? " steering accepted" : " working..."), 0, 0); },
 	});
