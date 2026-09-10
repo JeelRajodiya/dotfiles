@@ -63,7 +63,7 @@ export function spread(left: string, right: string, width: number): string {
 	return gap < 1 ? truncateToWidth(left, width) : left + " ".repeat(gap) + right;
 }
 
-/** "understand-a" reads as "Understand A": the dash is a key separator, not something to look at. */
+/** "tracer-a" reads as "Tracer A": the dash is a key separator, not something to look at. */
 export const displayName = (name: string) => name.split("-").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
 
 export function agentHeading(agent: RenderableAgent, theme: Theme): string {

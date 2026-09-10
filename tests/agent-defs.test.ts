@@ -13,8 +13,8 @@ assert.deepEqual(parseTeams("flat:\n  - planner\n  - builder\nrooted:\n  main: u
 	flat: { members: ["planner", "builder"] },
 	rooted: { root: "understand", members: ["iterate"] },
 });
-assert.deepEqual(parseTeams(readFileSync("dotfiles/agents/.pi/agent/agents/teams.yaml", "utf8"))["understand-iterate"], {
-	root: "understand", members: ["iterate"],
+assert.deepEqual(parseTeams(readFileSync("dotfiles/agents/.pi/agent/agents/teams.yaml", "utf8"))["tracer-fixer"], {
+	root: "tracer", members: ["fixer"],
 });
 const agent = (thinking?: string) => parseAgentMarkdown(`---\nname: specialist${thinking === undefined ? "" : `\nthinking: ${thinking}`}\n---\nprompt`, "specialist.md")!;
 assert.equal(agent("low").thinking, "low");

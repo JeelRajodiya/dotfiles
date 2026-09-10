@@ -59,8 +59,8 @@ export function instanceSuffix(index: number): string {
 }
 
 /**
- * Letters, not numbers. "Understand A" and "Understand B" stay distinct when skimmed, where
- * "understand-1" and "understand-2" differ by a single glyph at the far end of the word.
+ * Letters, not numbers. "Tracer A" and "Tracer B" stay distinct when skimmed, where
+ * "tracer-1" and "tracer-2" differ by a single glyph at the far end of the word.
  */
 export function nextAgentName(base: string, existingNames: Iterable<string>): string {
 	const normalizedBase = base.trim().toLowerCase().replace(/\s+/g, "-");
@@ -413,7 +413,7 @@ export function formatAgentContext(tokens: number, contextWindow: number): strin
 /**
  * Asking a child what it is doing costs a whole turn of its attention and, mid-task, derails it.
  * Peeking reads the activity log the widget already maintains, so the host can answer "what is
- * Understand doing" or "why is this slow" from state that is already in the parent process.
+ * Tracer doing" or "why is this slow" from state that is already in the parent process.
  */
 
 /** Enough to say what an agent is doing right now. The caller raises it to read further back. */
