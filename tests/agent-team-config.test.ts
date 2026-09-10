@@ -29,6 +29,14 @@ assert.deepEqual({ model: tracer.model, thinking: tracer.thinking, fast: tracer.
 	model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast: "false",
 });
 assert.ok(tracer.limitations);
+const reviewer = frontmatter("agents/reviewer.md");
+assert.deepEqual({ model: reviewer.model, thinking: reviewer.thinking, fast: reviewer.fast }, {
+	model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast: "false",
+}, "Reviewer pins its own depth instead of inheriting whatever the host is set to");
+// Delegation is decided by how long the orchestrator stays unavailable, not by task category.
+assert.match(orchestrator, /The test is how long you stay unavailable, not what kind of work it is\./);
+assert.doesNotMatch(orchestrator, /capability catalog/, "the runtime injects an agent-team-status snapshot now");
+assert.doesNotMatch(read("agents/fixer.md"), /the user (named|requested)/, "Fixer is dispatched by Orchestrator and never sees the user");
 assert.match(orchestrator, /use Mermaid diagrams when they clarify the answer/);
 assert.match(orchestrator, /When ask_user_question is available, you MUST use it for blocking clarifications, material alternatives, implementation-plan approval, and renewed approval after material scope changes\./);
 assert.match(orchestrator, /Batch all known decisions into one call; never make back-to-back questionnaire calls\./);
