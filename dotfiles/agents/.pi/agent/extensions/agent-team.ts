@@ -348,7 +348,9 @@ export default function (pi: ExtensionAPI) {
 					...state,
 					model: effectiveModel(state, widgetCtx),
 					fast: state === rootAgent ? hostFastMode(widgetCtx) : state.activeRun?.fast ?? effectiveFast(state, widgetCtx),
-					thinking: state === rootAgent ? widgetCtx.thinkingLevel ?? "off" : state.activeRun?.thinking ?? widgetCtx.thinkingLevel ?? "off",
+					// Idle instances have no run to read the level off, and falling through to the host's
+					// level made every card claim a depth its agent would not actually use.
+					thinking: state === rootAgent ? widgetCtx.thinkingLevel ?? "off" : state.activeRun?.thinking ?? resolveAgentThinking(state.def.thinking, widgetCtx.thinkingLevel),
 				}));
 				text.setText(renderGrid(cards, renderWidth, gridCols, theme).join("\n"));
 				return text.render(renderWidth);
