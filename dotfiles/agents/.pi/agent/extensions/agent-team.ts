@@ -9,7 +9,7 @@ import { join } from "path";
 import {
 	appendTaskHistory, addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, decideRouting, canClearAgent, canCompactAgent, canInterruptAgent, canKillHostAgent, canSteerAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
 	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, readChildSession,
-	nextAgentName, OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, removeQueuedItem, resultDeliveryStatus, restoreNextWaitingAgent, runConcurrent, shouldIgnoreAgentRunEvent, updateQueuedItem,
+	nextAgentName, OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, removeQueuedItem, resolveAgentThinking, resultDeliveryStatus, restoreNextWaitingAgent, runConcurrent, shouldIgnoreAgentRunEvent, updateQueuedItem,
 	restoreWaitingAgents, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
 	terminateChild, type AgentCompletionStatus, type AgentOrigin, type TaskHistoryEntry, type TokenCounts,
 } from "./agent-team-helpers.ts";
@@ -418,7 +418,7 @@ export default function (pi: ExtensionAPI) {
 		const childExtensions = ["openai-codex-fast.ts", "ponytail.ts"]
 			.map(name => join(getAgentDir(), "extensions", name)).filter(existsSync)
 			.flatMap(path => ["--extension", path]);
-		const thinking = ctx.thinkingLevel ?? "off";
+		const thinking = resolveAgentThinking(state.def.thinking, ctx.thinkingLevel);
 		const args = ["--mode", "rpc", "--no-extensions", ...childExtensions, "--model", effectiveModel(state, ctx), "--tools", state.def.tools, "--thinking", thinking, "--append-system-prompt", `${state.def.systemPrompt}\n\n# Assigned goal\n${state.goal}`, "--session", file];
 		if (state.sessionFile) args.push("-c");
 		const fast = effectiveFast(state, ctx);

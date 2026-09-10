@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
-import { canClearAgent, canCompactAgent, canSteerAgent, formatAgentModelLabel, formatToolActivity, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, readChildSession, resultDeliveryStatus, runConcurrent, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
+import { parseAgentMarkdown, parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
+import { canClearAgent, canCompactAgent, canSteerAgent, formatAgentModelLabel, formatToolActivity, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, readChildSession, resolveAgentThinking, resultDeliveryStatus, runConcurrent, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
 import { ActivityLog } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-activity.ts";
@@ -16,6 +16,13 @@ assert.deepEqual(parseTeams("flat:\n  - planner\n  - builder\nrooted:\n  main: u
 assert.deepEqual(parseTeams(readFileSync("dotfiles/agents/.pi/agent/agents/teams.yaml", "utf8"))["understand-iterate"], {
 	root: "understand", members: ["iterate"],
 });
+const agent = (thinking?: string) => parseAgentMarkdown(`---\nname: specialist${thinking === undefined ? "" : `\nthinking: ${thinking}`}\n---\nprompt`, "specialist.md")!;
+assert.equal(agent("low").thinking, "low");
+assert.equal(agent("medium").thinking, "medium");
+assert.equal(resolveAgentThinking(agent("invalid").thinking, "high"), "high");
+assert.equal(resolveAgentThinking(agent().thinking, "high"), "high");
+assert.equal(resolveAgentThinking(agent().thinking, undefined), "off");
+assert.equal(resolveAgentThinking(agent("off").thinking, "high"), "off");
 assert.equal(resultDeliveryStatus("done", true), "waiting");
 assert.equal(resultDeliveryStatus("error", true), "waiting");
 assert.equal(resultDeliveryStatus("error", false), "error");

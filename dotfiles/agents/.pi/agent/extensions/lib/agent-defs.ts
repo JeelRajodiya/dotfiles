@@ -1,12 +1,14 @@
 /** Discovery of agent definitions (`*.md` with frontmatter) and named teams (`teams.yaml`). */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
 export interface AgentDef {
 	name: string;
 	description: string;
 	model?: string;
 	fast?: boolean;
+	thinking?: ThinkingLevel;
 	limitations?: string;
 	tools: string;
 	systemPrompt: string;
@@ -28,6 +30,7 @@ export const CUSTOM_AGENT: AgentDef = {
 };
 
 const key = (name: string) => name.toLowerCase();
+const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 export function parseAgentFile(file: string): AgentDef | null {
 	try {
@@ -52,6 +55,7 @@ export function parseAgentMarkdown(raw: string, file: string): AgentDef | null {
 		description: frontmatter.description || "",
 		model: frontmatter.model,
 		fast: frontmatter.fast === "true" ? true : frontmatter.fast === "false" ? false : undefined,
+		thinking: THINKING_LEVELS.includes(frontmatter.thinking as ThinkingLevel) ? frontmatter.thinking as ThinkingLevel : undefined,
 		limitations: frontmatter.limitations,
 		tools: frontmatter.tools || DEFAULT_TOOLS,
 		systemPrompt: match[2].trim(),

@@ -1,8 +1,9 @@
 ---
 name: understand
 description: Investigate codebases and report findings to the orchestrator
-model: openai-codex/gpt-5.6-terra
-fast: true
+model: openai-codex/gpt-5.6-sol
+thinking: medium
+fast: false
 limitations: Research only; do not implement, review, or delegate.
 tools: read,bash,write,grep,find,ls
 ---

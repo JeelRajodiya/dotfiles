@@ -19,12 +19,16 @@ assert.deepEqual(frontmatter("agents/orchestrator.md"), {
 	model: "openai-codex/gpt-5.6-sol",
 	tools: "dispatch_agent,route_agent,spawn_agent,kill_agent,interrupt_agent,set_agent_model",
 });
-for (const name of ["understand", "iterate"]) {
-	const config = frontmatter(`agents/${name}.md`);
-	assert.equal(config.model, "openai-codex/gpt-5.6-terra");
-	assert.equal(config.fast, "true");
-	assert.ok(config.limitations);
-}
+const iterate = frontmatter("agents/iterate.md");
+assert.deepEqual({ model: iterate.model, thinking: iterate.thinking, fast: iterate.fast }, {
+	model: "openai-codex/gpt-5.6-sol", thinking: "low", fast: "true",
+});
+assert.ok(iterate.limitations);
+const understand = frontmatter("agents/understand.md");
+assert.deepEqual({ model: understand.model, thinking: understand.thinking, fast: understand.fast }, {
+	model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast: "false",
+});
+assert.ok(understand.limitations);
 assert.match(orchestrator, /use Mermaid diagrams when they clarify the answer/);
 assert.match(orchestrator, /When ask_user_question is available, you MUST use it for blocking clarifications, material alternatives, implementation-plan approval, and renewed approval after material scope changes\./);
 assert.match(orchestrator, /Batch all known decisions into one call; never make back-to-back questionnaire calls\./);

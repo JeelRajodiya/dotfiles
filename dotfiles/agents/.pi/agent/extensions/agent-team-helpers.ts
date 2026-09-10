@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { cleanActivity } from "./lib/agent-activity.ts";
 
 /**
@@ -12,6 +13,8 @@ import { cleanActivity } from "./lib/agent-activity.ts";
  * individually and a move would leave a dangling symlink until the next sync.)
  */
 export default function (_pi: ExtensionAPI): void {}
+
+export const resolveAgentThinking = (configured: ThinkingLevel | undefined, host: ThinkingLevel | undefined): ThinkingLevel => configured ?? host ?? "off";
 
 export function parseTellArguments(value: string): { agent: string; message: string } | undefined {
 	const match = value.trim().match(/^(\S+)\s+([\s\S]*\S)$/);
