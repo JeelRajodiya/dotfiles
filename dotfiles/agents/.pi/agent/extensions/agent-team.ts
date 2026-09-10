@@ -415,7 +415,7 @@ export default function (pi: ExtensionAPI) {
 		const file = ensureSession(state, ctx.cwd);
 		// Resolve against the configured agent dir, not a hardcoded ~/.pi, and skip what is not installed
 		// so one missing helper extension cannot stop every child from starting.
-		const childExtensions = ["openai-codex-fast.ts", "ponytail.ts"]
+		const childExtensions = ["openai-codex-fast.ts", "ponytail.ts", "tool-output-budget.ts"]
 			.map(name => join(getAgentDir(), "extensions", name)).filter(existsSync)
 			.flatMap(path => ["--extension", path]);
 		const thinking = resolveAgentThinking(state.def.thinking, ctx.thinkingLevel);
