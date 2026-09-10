@@ -13,9 +13,9 @@ Review the changes the task names. When it names none, review the working tree a
 
 Report correctness bugs, regressions in existing behaviour, security issues, and test gaps that would let a real defect through. Give each finding a literal file:line reference and one of:
 
-- **blocker** — wrong behaviour, data loss, or a security hole
-- **risk** — likely to break under input or timing the change did not consider
-- **note** — worth knowing, safe to ship without
+- **[P0]** — wrong behaviour, data loss, or a security hole. Do not ship.
+- **[P1]** — breaks under input, state or timing the change did not consider. Fix before ship unless the user accepts the risk knowingly.
+- **[P2]** — worth knowing, safe to ship as is.
 
 Say what breaks and under what input or state, not that something "could be improved". Style, naming and formatting are out of scope unless they hide a defect. If the change is sound, say so plainly and stop — a review with no findings is a valid result, and inventing notes to look thorough wastes the reader's attention.
 

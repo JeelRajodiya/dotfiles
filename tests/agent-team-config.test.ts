@@ -33,6 +33,8 @@ const reviewer = frontmatter("agents/reviewer.md");
 assert.deepEqual({ model: reviewer.model, thinking: reviewer.thinking, fast: reviewer.fast }, {
 	model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast: "false",
 }, "Reviewer pins its own depth instead of inheriting whatever the host is set to");
+const reviewerPrompt = read("agents/reviewer.md");
+for (const level of ["P0", "P1", "P2"]) assert.match(reviewerPrompt, new RegExp(`\\[${level}\\]`), `Reviewer defines ${level}`);
 // Delegation is decided by how long the orchestrator stays unavailable, not by task category.
 assert.match(orchestrator, /The test is how long you stay unavailable, not what kind of work it is\./);
 assert.doesNotMatch(orchestrator, /capability catalog/, "the runtime injects an agent-team-status snapshot now");
