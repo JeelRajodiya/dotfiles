@@ -51,12 +51,24 @@ export function canInterruptAgent(status: string, isRoot: boolean): boolean {
 }
 
 /** Allocate the first positive instance suffix without changing existing identities. */
+/** a, b, … z, aa, ab — spreadsheet columns, so the sequence never runs out. */
+export function instanceSuffix(index: number): string {
+	let suffix = "";
+	for (let n = index; n >= 0; n = Math.floor(n / 26) - 1) suffix = String.fromCharCode(97 + (n % 26)) + suffix;
+	return suffix;
+}
+
+/**
+ * Letters, not numbers. "Understand A" and "Understand B" stay distinct when skimmed, where
+ * "understand-1" and "understand-2" differ by a single glyph at the far end of the word.
+ */
 export function nextAgentName(base: string, existingNames: Iterable<string>): string {
 	const normalizedBase = base.trim().toLowerCase().replace(/\s+/g, "-");
 	const existing = new Set(Array.from(existingNames, name => name.toLowerCase()));
-	let suffix = 1;
-	while (existing.has(`${normalizedBase}-${suffix}`)) suffix++;
-	return `${normalizedBase}-${suffix}`;
+	for (let index = 0; ; index++) {
+		const candidate = `${normalizedBase}-${instanceSuffix(index)}`;
+		if (!existing.has(candidate)) return candidate;
+	}
 }
 
 export type AgentOrigin = "default" | "user" | "host";

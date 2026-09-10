@@ -4,9 +4,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAgentMarkdown, parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
-import { canClearAgent, canCompactAgent, canSteerAgent, formatAgentModelLabel, formatToolActivity, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, readChildSession, resolveAgentThinking, resultDeliveryStatus, runConcurrent, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
+import { canClearAgent, canCompactAgent, canSteerAgent, formatAgentModelLabel, formatToolActivity, instanceSuffix, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, readChildSession, resolveAgentThinking, resultDeliveryStatus, runConcurrent, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
+import { displayName, renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
 import { ActivityLog } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-activity.ts";
 
 assert.deepEqual(parseTeams("flat:\n  - planner\n  - builder\nrooted:\n  main: understand\n  subs:\n    - iterate\n"), {
@@ -55,9 +55,15 @@ const concurrent = runConcurrent([
 assert.deepEqual(starts, ["first", "second"], "all compactions start before any settles");
 resolveFirst("first"); rejectSecond(new Error("failed"));
 assert.deepEqual((await concurrent).map(result => result.status), ["fulfilled", "rejected"]);
-assert.equal(nextAgentName("iterate", []), "iterate-1");
-assert.equal(nextAgentName("iterate", ["iterate-1"]), "iterate-2");
-assert.equal(nextAgentName("Iterate", ["iterate-1", "ITERATE-2", "iterate-4"]), "iterate-3");
+assert.equal(nextAgentName("iterate", []), "iterate-a");
+assert.equal(nextAgentName("iterate", ["iterate-a"]), "iterate-b");
+assert.equal(nextAgentName("Iterate", ["iterate-a", "ITERATE-B", "iterate-d"]), "iterate-c", "case-insensitive, and it fills the first free letter");
+assert.equal(instanceSuffix(0), "a");
+assert.equal(instanceSuffix(25), "z");
+assert.equal(instanceSuffix(26), "aa", "the sequence continues past z rather than colliding");
+assert.equal(instanceSuffix(701), "zz");
+assert.equal(displayName("iterate-a"), "Iterate A", "the dash is a key separator, not something the user reads");
+assert.equal(displayName("understand-aa"), "Understand Aa");
 
 assert.equal(parseOpenAIFastEnvValue("on"), true);
 assert.equal(parseOpenAIFastEnvValue("off"), false);

@@ -63,8 +63,11 @@ export function spread(left: string, right: string, width: number): string {
 	return gap < 1 ? truncateToWidth(left, width) : left + " ".repeat(gap) + right;
 }
 
+/** "understand-a" reads as "Understand A": the dash is a key separator, not something to look at. */
+export const displayName = (name: string) => name.split("-").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+
 export function agentHeading(agent: RenderableAgent, theme: Theme): string {
-	const named = theme.bold(theme.fg("accent", agent.name));
+	const named = theme.bold(theme.fg("accent", displayName(agent.name)));
 	return agent.name.toLowerCase() === agent.def.name.toLowerCase()
 		? named
 		: named + theme.fg("dim", ` (${agent.def.name})`);

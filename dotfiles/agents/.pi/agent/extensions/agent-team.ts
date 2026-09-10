@@ -15,7 +15,7 @@ import {
 } from "./agent-team-helpers.ts";
 import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity.ts";
 import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs.ts";
-import { FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } from "./lib/agent-render.ts";
+import { displayName, FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } from "./lib/agent-render.ts";
 
 interface ActiveAgentRun {
 	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; text: TextTail; stderrChunks: string[]; initialTask: string; tasks: string[];
@@ -46,7 +46,7 @@ const MAX_KEPT_SESSIONS = 20;
 const ACTIVITY_HISTORY = 400;
 const ACTIVITY_HISTORY_CHARS = ACTIVITY_HISTORY * 200;
 const VIEW_ACTIVITY_LINES = 24;
-const displayName = (name: string) => name.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+
 const key = (name: string) => name.toLowerCase();
 const normalizeName = (name: string) => name.trim().toLowerCase().replace(/\s+/g, "-");
 
@@ -88,7 +88,8 @@ export default function (pi: ExtensionAPI) {
 	/** The host's own tools, captured before this extension first narrowed them, so demote can give them back. */
 	let hostTools: string[] | undefined; let rootModelRestored = true;
 
-	const stateFor = (name: string) => agentStates.get(key(name));
+	// Accepts what the cards show ("Understand A") as well as the stored key ("understand-a").
+	const stateFor = (name: string) => agentStates.get(key(normalizeName(name)));
 	const definitionFor = (type: string) => key(type) === "custom" ? CUSTOM_AGENT : allAgentDefs.find(candidate => key(candidate.name) === key(type));
 	const predefinedDefs = () => allAgentDefs.filter(def => key(def.name) !== "custom");
 	const promotableBaseDefs = () => predefinedDefs().filter(def => ![...agentStates.values()].some(state => key(state.name) === key(def.name) || key(state.def.name) === key(def.name)));
