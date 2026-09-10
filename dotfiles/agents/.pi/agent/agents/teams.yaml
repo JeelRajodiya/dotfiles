@@ -4,7 +4,7 @@ default:
   auto-spawn-limit: 3
   subs:
     - tracer
-    - fixer
+    - worker
     - reviewer
 
 plan-build:
@@ -12,7 +12,7 @@ plan-build:
   - builder
   - reviewer
 
-tracer-fixer:
+tracer-worker:
   main: tracer
   subs:
-    - fixer
+    - worker

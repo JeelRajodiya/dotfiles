@@ -11,7 +11,7 @@ const frontmatter = (path: string) => Object.fromEntries(
 const team = read("agents/teams.yaml");
 const orchestrator = read("agents/orchestrator.md");
 const agentTeam = read("extensions/agent-team.ts");
-assert.match(team, /^default:\n  main: orchestrator\n  auto-spawn: true\n  auto-spawn-limit: 3\n  subs:\n    - tracer\n    - fixer\n    - reviewer$/m);
+assert.match(team, /^default:\n  main: orchestrator\n  auto-spawn: true\n  auto-spawn-limit: 3\n  subs:\n    - tracer\n    - worker\n    - reviewer$/m);
 assert.match(read("settings.json"), /"npm:@juicesharp\/rpiv-ask-user-question"/);
 assert.deepEqual(frontmatter("agents/orchestrator.md"), {
 	name: "orchestrator",
@@ -19,11 +19,11 @@ assert.deepEqual(frontmatter("agents/orchestrator.md"), {
 	model: "openai-codex/gpt-5.6-sol",
 	tools: "dispatch_agent,peek_agent,route_agent,spawn_agent,kill_agent,interrupt_agent,set_agent_model,get_context_remaining,new_context",
 });
-const fixer = frontmatter("agents/fixer.md");
-assert.deepEqual({ model: fixer.model, thinking: fixer.thinking, fast: fixer.fast }, {
+const worker = frontmatter("agents/worker.md");
+assert.deepEqual({ model: worker.model, thinking: worker.thinking, fast: worker.fast }, {
 	model: "openai-codex/gpt-5.6-sol", thinking: "low", fast: "true",
 });
-assert.ok(fixer.limitations);
+assert.ok(worker.limitations);
 const tracer = frontmatter("agents/tracer.md");
 assert.deepEqual({ model: tracer.model, thinking: tracer.thinking, fast: tracer.fast }, {
 	model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast: "false",
@@ -38,22 +38,22 @@ for (const level of ["P0", "P1", "P2"]) assert.match(reviewerPrompt, new RegExp(
 // Delegation is decided by how long the orchestrator stays unavailable, not by task category.
 assert.match(orchestrator, /The test is how long you stay unavailable, not what kind of work it is\./);
 assert.doesNotMatch(orchestrator, /capability catalog/, "the runtime injects an agent-team-status snapshot now");
-assert.doesNotMatch(read("agents/fixer.md"), /the user (named|requested)/, "Fixer is dispatched by Orchestrator and never sees the user");
+assert.doesNotMatch(read("agents/worker.md"), /the user (named|requested)/, "Worker is dispatched by Orchestrator and never sees the user");
 assert.match(orchestrator, /use Mermaid diagrams when they clarify the answer/);
 assert.match(orchestrator, /When ask_user_question is available, you MUST use it for blocking clarifications, material alternatives, implementation-plan approval, and renewed approval after material scope changes\./);
 assert.match(orchestrator, /Batch all known decisions into one call; never make back-to-back questionnaire calls\./);
 assert.match(orchestrator, /Keep rhetorical questions, direct answers, status updates, nonblocking suggestions, and already-answered questions in prose\. If unavailable or noninteractive, ask the necessary question in text and wait\./);
 assert.match(orchestrator, /An implementation request starts planning; it is not approval to implement an unseen plan\./);
-assert.match(orchestrator, /Ask for explicit confirmation and wait for it before dispatching Fixer\./);
-assert.match(read("agents/fixer.md"), /wait for renewed user approval before changing scope\./);
+assert.match(orchestrator, /Ask for explicit confirmation and wait for it before dispatching Worker\./);
+assert.match(read("agents/worker.md"), /wait for renewed user approval before changing scope\./);
 assert.equal(frontmatter("agents/reviewer.md").model, "openai-codex/gpt-5.6-sol");
 assert.match(agentTeam, /const DEFAULT_TEAM = "default"/);
 assert.match(agentTeam, /const TEAM_TOOLS = \["dispatch_agent", "peek_agent", "route_agent", "spawn_agent", "kill_agent", "interrupt_agent", "set_agent_model", "get_context_remaining", "new_context"\]/);
 assert.match(agentTeam, /rootAgent \? TEAM_TOOLS : agentStates\.size \? TEAM_TOOLS : undefined/);
 assert.match(agentTeam, /agent-team-routing/);
-// The approval gate has to cover every path into Fixer. route_agent and spawn_agent take an
+// The approval gate has to cover every path into Worker. route_agent and spawn_agent take an
 // approved flag; dispatch_agent used to take none, so naming the instance directly walked past it.
-assert.equal(agentTeam.match(/=== "fixer" && !approved/g)?.length, 3, "dispatch, route and spawn are all gated");
+assert.equal(agentTeam.match(/=== "worker" && !approved/g)?.length, 3, "dispatch, route and spawn are all gated");
 // An idle instance has no activeRun to read its level from; it must fall back to its own
 // definition, not to whatever the host happens to be set to.
 assert.match(agentTeam, /state\.activeRun\?\.thinking \?\? resolveAgentThinking\(state\.def\.thinking, widgetCtx\.thinkingLevel\)/);

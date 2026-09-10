@@ -13,8 +13,8 @@ assert.deepEqual(parseTeams("flat:\n  - planner\n  - builder\nrooted:\n  main: u
 	flat: { members: ["planner", "builder"] },
 	rooted: { root: "understand", members: ["iterate"] },
 });
-assert.deepEqual(parseTeams(readFileSync("dotfiles/agents/.pi/agent/agents/teams.yaml", "utf8"))["tracer-fixer"], {
-	root: "tracer", members: ["fixer"],
+assert.deepEqual(parseTeams(readFileSync("dotfiles/agents/.pi/agent/agents/teams.yaml", "utf8"))["tracer-worker"], {
+	root: "tracer", members: ["worker"],
 });
 const agent = (thinking?: string) => parseAgentMarkdown(`---\nname: specialist${thinking === undefined ? "" : `\nthinking: ${thinking}`}\n---\nprompt`, "specialist.md")!;
 assert.equal(agent("low").thinking, "low");
@@ -57,10 +57,10 @@ resolveFirst("first"); rejectSecond(new Error("failed"));
 assert.deepEqual((await concurrent).map(result => result.status), ["fulfilled", "rejected"]);
 // A lone specialist carries no suffix at all: with one of each type the letter would be on every
 // card and mean nothing.
-assert.equal(nextAgentName("fixer", []), "fixer");
-assert.equal(nextAgentName("fixer", ["fixer"]), "fixer-b", "the second starts at B, since the bare name is already A");
-assert.equal(nextAgentName("Fixer", ["fixer", "FIXER-B", "fixer-d"]), "fixer-c", "case-insensitive, and it fills the first free letter");
-assert.equal(nextAgentName("fixer", ["fixer-b"]), "fixer", "a free base name is taken before any letter");
+assert.equal(nextAgentName("worker", []), "worker");
+assert.equal(nextAgentName("worker", ["worker"]), "worker-b", "the second starts at B, since the bare name is already A");
+assert.equal(nextAgentName("Worker", ["worker", "WORKER-B", "worker-d"]), "worker-c", "case-insensitive, and it fills the first free letter");
+assert.equal(nextAgentName("worker", ["worker-b"]), "worker", "a free base name is taken before any letter");
 assert.equal(instanceSuffix(0), "a");
 assert.equal(instanceSuffix(25), "z");
 assert.equal(instanceSuffix(26), "aa", "the sequence continues past z rather than colliding");
