@@ -55,9 +55,12 @@ const concurrent = runConcurrent([
 assert.deepEqual(starts, ["first", "second"], "all compactions start before any settles");
 resolveFirst("first"); rejectSecond(new Error("failed"));
 assert.deepEqual((await concurrent).map(result => result.status), ["fulfilled", "rejected"]);
-assert.equal(nextAgentName("iterate", []), "iterate-a");
-assert.equal(nextAgentName("iterate", ["iterate-a"]), "iterate-b");
-assert.equal(nextAgentName("Iterate", ["iterate-a", "ITERATE-B", "iterate-d"]), "iterate-c", "case-insensitive, and it fills the first free letter");
+// A lone specialist carries no suffix at all: with one of each type the letter would be on every
+// card and mean nothing.
+assert.equal(nextAgentName("fixer", []), "fixer");
+assert.equal(nextAgentName("fixer", ["fixer"]), "fixer-b", "the second starts at B, since the bare name is already A");
+assert.equal(nextAgentName("Fixer", ["fixer", "FIXER-B", "fixer-d"]), "fixer-c", "case-insensitive, and it fills the first free letter");
+assert.equal(nextAgentName("fixer", ["fixer-b"]), "fixer", "a free base name is taken before any letter");
 assert.equal(instanceSuffix(0), "a");
 assert.equal(instanceSuffix(25), "z");
 assert.equal(instanceSuffix(26), "aa", "the sequence continues past z rather than colliding");

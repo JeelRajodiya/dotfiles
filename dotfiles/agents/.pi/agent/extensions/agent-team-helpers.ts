@@ -59,13 +59,19 @@ export function instanceSuffix(index: number): string {
 }
 
 /**
- * Letters, not numbers. "Tracer A" and "Tracer B" stay distinct when skimmed, where
- * "tracer-1" and "tracer-2" differ by a single glyph at the far end of the word.
+ * The first instance of a type is just the type. A suffix that never varies is noise on every
+ * card, and the card already drops its type label when name and type match — so a lone specialist
+ * reads "Tracer" rather than "Tracer A tracer".
+ *
+ * Later instances take letters from B: the bare name is already A in everything but spelling.
+ * Letters rather than numbers because "Tracer B" and "Tracer C" stay distinct when skimmed, where
+ * "tracer-1" and "tracer-2" differ by one glyph at the far end of the word.
  */
 export function nextAgentName(base: string, existingNames: Iterable<string>): string {
 	const normalizedBase = base.trim().toLowerCase().replace(/\s+/g, "-");
 	const existing = new Set(Array.from(existingNames, name => name.toLowerCase()));
-	for (let index = 0; ; index++) {
+	if (!existing.has(normalizedBase)) return normalizedBase;
+	for (let index = 1; ; index++) {
 		const candidate = `${normalizedBase}-${instanceSuffix(index)}`;
 		if (!existing.has(candidate)) return candidate;
 	}
