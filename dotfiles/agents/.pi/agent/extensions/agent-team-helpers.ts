@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs
 import { join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { cleanActivity } from "./lib/agent-activity.ts";
+import { cleanActivity, formatActivityDuration, thoughtActivityLabel, type ActivityEntry } from "./lib/agent-activity.ts";
 
 /**
  * Support code for agent-team.ts, not an extension of its own.
@@ -280,7 +280,7 @@ export interface ChildSessionSnapshot {
  * session_start. Keeping them as separate entry points also meant two copies of the same
  * message-shape handling that had to be kept in step by a test asserting they agreed.
  */
-export function readChildSession(sessionFile: string, maxEntries = 24): ChildSessionSnapshot {
+export function readChildSession(sessionFile: string, maxEntries = 24, maxChars = 5000): ChildSessionSnapshot {
 	const empty: ChildSessionSnapshot = { activity: "", contextTokens: undefined, tokens: { input: 0, output: 0 } };
 	if (!existsSync(sessionFile)) return empty;
 	let raw: string;
@@ -333,7 +333,7 @@ export function readChildSession(sessionFile: string, maxEntries = 24): ChildSes
 			}
 		} catch {}
 	}
-	return { activity: activity.slice(-maxEntries).join("\n").slice(-5000), contextTokens, tokens };
+	return { activity: activity.slice(-maxEntries).join("\n").slice(-maxChars), contextTokens, tokens };
 }
 
 function safePathComponent(value: string, label: string): string {
@@ -394,6 +394,101 @@ export function childSessionPath(root: string, parentSessionId: string, agentNam
 
 export function formatAgentContext(tokens: number, contextWindow: number): string {
 	return `${formatCompactCount(tokens)}/${contextWindow > 0 ? formatCompactCount(contextWindow) : "?"}`;
+}
+
+/* --- peeking: reading a child's activity without prompting it ------------------------------ */
+
+/**
+ * Asking a child what it is doing costs a whole turn of its attention and, mid-task, derails it.
+ * Peeking reads the activity log the widget already maintains, so the host can answer "what is
+ * Understand doing" or "why is this slow" from state that is already in the parent process.
+ */
+
+/** Enough to say what an agent is doing right now. The caller raises it to read further back. */
+export const PEEK_DEFAULT_ENTRIES = 8;
+/** A peek that replayed a whole run would cost the host more context than the answer is worth. */
+export const PEEK_MAX_CHARS = 12_000;
+/** Charged per line on top of its text, for the age and kind that prefix it. */
+const PEEK_LINE_OVERHEAD = 32;
+
+const PEEK_KIND_LABEL: Record<string, string> = {
+	user: "task", assistant: "reply", "tool-start": "tool·running", "tool-done": "tool·ok", "tool-error": "tool·failed",
+};
+
+export interface PeekSelection { shown: ActivityEntry[]; omitted: number; total: number }
+
+/**
+ * The newest `limit` entries, optionally narrowed to a recent window and always trimmed to a
+ * character budget. Entries carrying no `at` are transcript history this process never watched
+ * (see ActivityEntry), so a window request drops them rather than assuming they are recent.
+ */
+export function selectPeekEntries(
+	entries: readonly ActivityEntry[],
+	options: { limit?: number; withinMs?: number; now?: number; maxChars?: number } = {},
+): PeekSelection {
+	const now = options.now ?? Date.now();
+	const maxChars = options.maxChars ?? PEEK_MAX_CHARS;
+	const limit = Math.max(1, Math.floor(options.limit ?? PEEK_DEFAULT_ENTRIES));
+	const withinMs = options.withinMs;
+	const candidates = withinMs === undefined
+		? entries
+		: entries.filter(entry => entry.at !== undefined && now - entry.at <= withinMs);
+	const shown = candidates.slice(Math.max(0, candidates.length - limit));
+	let chars = shown.reduce((sum, entry) => sum + entry.text.length + PEEK_LINE_OVERHEAD, 0);
+	// Never return nothing: one over-budget entry still answers "what is it doing".
+	while (shown.length > 1 && chars > maxChars) chars -= shown.shift()!.text.length + PEEK_LINE_OVERHEAD;
+	return { shown, omitted: entries.length - shown.length, total: entries.length };
+}
+
+const peekAge = (entry: ActivityEntry, now: number) =>
+	entry.at === undefined ? "earlier" : `${formatActivityDuration(now - entry.at)} ago`;
+
+export function formatPeekEntry(entry: ActivityEntry, now: number): string {
+	const body = entry.kind === "thought"
+		? thoughtActivityLabel(entry, now)
+		: `${PEEK_KIND_LABEL[entry.kind] ?? entry.kind} — ${entry.text}`;
+	return `- ${peekAge(entry, now)} · ${body}`;
+}
+
+export interface PeekAgentView {
+	name: string; type: string; status: string; goal: string; task: string; model: string;
+	elapsed: number; toolCount: number; contextTokens: number; contextWindow: number;
+	lastWork: string; history: readonly TaskHistoryEntry[]; pendingOutcome?: AgentCompletionStatus;
+}
+
+/** The unfinished tool call, if one is holding the run up: finishTool rewrites the kind in place. */
+export function peekInFlightTool(entries: readonly ActivityEntry[], status: string, now: number): string | undefined {
+	if (status !== "running") return undefined;
+	const pending = entries.findLast(entry => entry.kind === "tool-start");
+	if (!pending) return undefined;
+	return pending.at === undefined ? pending.text : `${pending.text} — running ${formatActivityDuration(now - pending.at)}`;
+}
+
+export function formatAgentPeek(
+	view: PeekAgentView,
+	entries: readonly ActivityEntry[],
+	options: { limit?: number; withinMs?: number; now?: number; maxChars?: number } = {},
+): { text: string; selection: PeekSelection } {
+	const now = options.now ?? Date.now();
+	const selection = selectPeekEntries(entries, { ...options, now });
+	const status = view.status === "waiting" && view.pendingOutcome ? `waiting (${view.pendingOutcome} queued)` : view.status;
+	const inFlight = peekInFlightTool(entries, view.status, now);
+	const history = view.history.slice(-3).map(entry => `${entry.outcome}:${shortActivityText(entry.task, 96)}`).join(" | ");
+	const window = options.withinMs === undefined ? "" : ` within the last ${formatActivityDuration(options.withinMs)}`;
+	const heading = selection.total
+		? `Activity — ${selection.shown.length} of ${selection.total} entries${window}, oldest first${selection.omitted ? ` (${selection.omitted} earlier not shown)` : ""}:`
+		: "Activity — nothing recorded yet.";
+	const lines = [
+		`${view.name} (${view.type}) — ${[status, view.model, `${formatActivityDuration(view.elapsed)} on this run`, `${view.toolCount} tool calls`, `${formatAgentContext(view.contextTokens, view.contextWindow)} context`].join(" · ")}`,
+		`Goal: ${shortActivityText(view.goal, 200) || "(none)"}`,
+		`Current task: ${shortActivityText(view.task, 200) || "(none)"}`,
+	];
+	if (inFlight) lines.push(`In flight: ${inFlight}`);
+	if (view.status !== "running" && view.lastWork) lines.push(`Last output: ${shortActivityText(view.lastWork, 200)}`);
+	if (history) lines.push(`Recent completed tasks: ${history}`);
+	lines.push("", heading, ...selection.shown.map(entry => formatPeekEntry(entry, now)));
+	lines.push("", `Read from ${view.name}'s activity log — it was not prompted, steered, or interrupted.`);
+	return { text: lines.join("\n"), selection };
 }
 
 type PendingRpc = {

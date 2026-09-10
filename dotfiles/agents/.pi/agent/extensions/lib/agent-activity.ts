@@ -10,7 +10,12 @@
  */
 
 export type ActivityKind = "user" | "assistant" | "thought" | "tool-start" | "tool-done" | "tool-error";
-export interface ActivityEntry { kind: ActivityKind; text: string; toolCallId?: string; startedAt?: number; finishedAt?: number }
+/**
+ * `at` is when this entry last moved, and only live events carry it: entries rebuilt by parse()
+ * come from a transcript this process did not watch, so stamping them with the clock would
+ * invent an age. Peeking reports "unknown" for those rather than a plausible lie.
+ */
+export interface ActivityEntry { kind: ActivityKind; text: string; toolCallId?: string; startedAt?: number; finishedAt?: number; at?: number }
 
 const KINDS = new Set<string>(["user", "assistant", "thought", "tool-start", "tool-done", "tool-error"]);
 const LINE = /^(user|assistant|thought|tool-start|tool-done|tool-error):\s*([\s\S]*)$/i;
@@ -91,18 +96,17 @@ export class ActivityLog {
 		// Thoughts returned above, so only assistant deltas coalesce here.
 		if (kind === "assistant" && last?.kind === kind && !last.finishedAt) {
 			last.text = this.clamp(`${last.text} ${text}`.replace(/\s+/g, " "));
+			last.at = Date.now();
 			return;
 		}
-		this.entries.push({ kind, text: this.clamp(text) });
-		if (this.entries.length > this.maxEntries) this.entries.splice(0, this.entries.length - this.maxEntries);
+		this.push({ kind, text: this.clamp(text), at: Date.now() });
 	}
 
 	/** Keep one row per identified tool call; missing IDs deliberately remain separate. */
 	startTool(toolCallId: string, value: unknown): void {
 		const text = cleanActivity(value);
 		if (!text) return;
-		this.entries.push({ kind: "tool-start", text: this.clamp(text), toolCallId });
-		if (this.entries.length > this.maxEntries) this.entries.splice(0, this.entries.length - this.maxEntries);
+		this.push({ kind: "tool-start", text: this.clamp(text), toolCallId, at: Date.now() });
 	}
 
 	finishTool(toolCallId: string | undefined, kind: "tool-done" | "tool-error", value: unknown): void {
@@ -114,6 +118,7 @@ export class ActivityLog {
 		if (pending) {
 			pending.kind = kind;
 			pending.text = this.clamp(text);
+			pending.at = Date.now();
 			return;
 		}
 		this.append(kind, text);
@@ -122,8 +127,7 @@ export class ActivityLog {
 	startThought(now = Date.now()): void {
 		const last = this.entries.at(-1);
 		if (last?.kind === "thought" && !last.finishedAt) return;
-		this.entries.push({ kind: "thought", text: "", startedAt: now });
-		if (this.entries.length > this.maxEntries) this.entries.splice(0, this.entries.length - this.maxEntries);
+		this.push({ kind: "thought", text: "", startedAt: now, at: now });
 	}
 
 	appendThought(value: unknown): void {
@@ -133,6 +137,12 @@ export class ActivityLog {
 		if (last?.kind !== "thought" || last.finishedAt) this.startThought();
 		const thought = this.entries.at(-1)!;
 		thought.text = this.clamp(mergeThoughtActivity(thought.text, text));
+		thought.at = Date.now();
+	}
+
+	private push(entry: ActivityEntry): void {
+		this.entries.push(entry);
+		if (this.entries.length > this.maxEntries) this.entries.splice(0, this.entries.length - this.maxEntries);
 	}
 
 	/**
@@ -173,14 +183,25 @@ export class ActivityLog {
 			else if ((kind === "tool-done" || kind === "tool-error") && text && toolCallId) log.finishTool(toolCallId, kind, text);
 			else log.append(kind, match[2]);
 		}
+		// The transcript carries no wall clock, and these entries are replayed all at once: drop the
+		// stamps the mutators just wrote rather than dating a whole prior run to this instant.
+		for (const entry of log.entries) entry.at = undefined;
 		return log;
 	}
 
-	/** Entries newest-last. `fallback` stands in for an agent that has produced only a final message. */
-	list(fallback = ""): ActivityEntry[] {
-		if (this.entries.length) return this.entries.map(entry => ({ ...entry }));
-		const text = cleanActivity(fallback);
-		return text ? [{ kind: "assistant", text: this.clamp(text) }] : [];
+	/**
+	 * Entries newest-last, at most `limit` of them. `fallback` stands in for an agent that has
+	 * produced only a final message.
+	 */
+	list(fallback = "", limit?: number): ActivityEntry[] {
+		let entries = this.entries;
+		if (!entries.length) {
+			const text = cleanActivity(fallback);
+			if (!text) return [];
+			entries = [{ kind: "assistant", text: this.clamp(text) }];
+		}
+		const start = limit === undefined ? 0 : Math.max(0, entries.length - Math.max(0, limit));
+		return entries.slice(start).map(entry => ({ ...entry }));
 	}
 
 	get size(): number {

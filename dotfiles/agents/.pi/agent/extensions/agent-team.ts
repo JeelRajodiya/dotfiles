@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
 	appendTaskHistory, addTokenCounts, AGENT_VIEW_COMMAND, AgentRpcTransport, decideRouting, canClearAgent, canCompactAgent, canInterruptAgent, canKillHostAgent, canSteerAgent, childSessionPath, contextTokensFromUsage, encodeCwd,
-	formatAgentModelLabel, formatToolActivity, interruptAgentRun, isAgentViewCommand, readChildSession,
+	formatAgentModelLabel, formatAgentPeek, formatToolActivity, interruptAgentRun, isAgentViewCommand, PEEK_DEFAULT_ENTRIES, readChildSession,
 	nextAgentName, OPENAI_FAST_ENV, parseTellArguments, pruneSessionDirs, removeQueuedItem, resolveAgentThinking, resultDeliveryStatus, restoreNextWaitingAgent, runConcurrent, shouldIgnoreAgentRunEvent, updateQueuedItem,
 	restoreWaitingAgents, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
 	terminateChild, type AgentCompletionStatus, type AgentOrigin, type TaskHistoryEntry, type TokenCounts,
@@ -34,10 +34,18 @@ type QueueItem = { id: string; type: string; instance?: string; task: string; ap
 type SavedRouting = { autoSpawn?: boolean; limit?: number; queue?: QueueItem[] };
 type LegacyTeamMode = { team?: string | null };
 
-const TEAM_TOOLS = ["dispatch_agent", "route_agent", "spawn_agent", "kill_agent", "interrupt_agent", "set_agent_model"];
+const TEAM_TOOLS = ["dispatch_agent", "peek_agent", "route_agent", "spawn_agent", "kill_agent", "interrupt_agent", "set_agent_model"];
 const DEFAULT_TEAM = "default";
 const DEFAULT_AUTO_SPAWN_LIMIT = 3;
 const MAX_KEPT_SESSIONS = 20;
+/**
+ * How much activity each instance keeps. The detail pane only ever draws VIEW_ACTIVITY_LINES of
+ * it; the rest is depth for peek_agent, which is only useful if there is history left to read.
+ * Entries are already clamped to 400 characters, so the ceiling is bounded memory, not a leak.
+ */
+const ACTIVITY_HISTORY = 400;
+const ACTIVITY_HISTORY_CHARS = ACTIVITY_HISTORY * 200;
+const VIEW_ACTIVITY_LINES = 24;
 const displayName = (name: string) => name.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 const key = (name: string) => name.toLowerCase();
 const normalizeName = (name: string) => name.trim().toLowerCase().replace(/\s+/g, "-");
@@ -153,8 +161,8 @@ export default function (pi: ExtensionAPI) {
 		const sessionKey = rawSessionKey.toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "agent";
 		const provisional = { name, def, sessionKey } as AgentState; const file = sessionPath(provisional);
 		// One pass over the transcript; three separate reads here showed up at every session_start.
-		const restored = readChildSession(file);
-		return { name, def, goal, status: "idle", task: "", toolCount: 0, elapsed: 0, lastWork: "", activity: ActivityLog.parse(restored.activity),
+		const restored = readChildSession(file, ACTIVITY_HISTORY, ACTIVITY_HISTORY_CHARS);
+		return { name, def, goal, status: "idle", task: "", toolCount: 0, elapsed: 0, lastWork: "", activity: ActivityLog.parse(restored.activity, ACTIVITY_HISTORY),
 			contextTokens: restored.contextTokens ?? 0, contextWindow: modelWindow(def.model ?? parentModel(widgetCtx), widgetCtx), tokens: restored.tokens,
 			sessionFile: existsSync(file) ? file : null, runCount: 0, autoName, origin, history: [], sessionKey };
 	}
@@ -292,7 +300,7 @@ export default function (pi: ExtensionAPI) {
 		state.sessionFile = null;
 		state.contextTokens = 0;
 		state.tokens = { input: 0, output: 0 };
-		state.activity = new ActivityLog();
+		state.activity = new ActivityLog(ACTIVITY_HISTORY);
 		state.history = [];
 		state.runCount = 0;
 		state.task = "";
@@ -327,7 +335,7 @@ export default function (pi: ExtensionAPI) {
 						: viewedAgent.activeRun?.fast ?? effectiveFast(viewedAgent, widgetCtx);
 					const viewed = { ...viewedAgent, model: effectiveModel(viewedAgent, widgetCtx), fast };
 					text.setText(renderDetail(viewed, Math.max(12, renderWidth), theme, {
-						model: formatAgentModelLabel(viewed.model, viewed.fast), activity: viewedAgent.activity.list(viewedAgent.lastWork), steerable: viewedAgent !== rootAgent,
+						model: formatAgentModelLabel(viewed.model, viewed.fast), activity: viewedAgent.activity.list(viewedAgent.lastWork, VIEW_ACTIVITY_LINES), steerable: viewedAgent !== rootAgent,
 					}));
 					return text.render(renderWidth);
 				}
@@ -408,7 +416,7 @@ export default function (pi: ExtensionAPI) {
 		state.status = "running"; state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); state.toolCount = 0; state.elapsed = 0; state.lastWork = "";
 		// Maintenance runs (compaction) must not enter the transcript as a task the agent was given.
 		if (options.record === false) state.task = "Compacting";
-		else { state.task = task; state.activity = ActivityLog.parse(readChildSession(sessionPath(state)).activity); state.activity.append("user", task); state.runCount++; }
+		else { state.task = task; state.activity = ActivityLog.parse(readChildSession(sessionPath(state), ACTIVITY_HISTORY, ACTIVITY_HISTORY_CHARS).activity, ACTIVITY_HISTORY); state.activity.append("user", task); state.runCount++; }
 		// Ticks at frame rate so the spinner turns; updateWidget throttles the actual repaints.
 		const startTime = Date.now(); clearInterval(state.timer); state.timer = setInterval(() => { state.elapsed = Date.now() - startTime; updateWidget(); }, FRAME_MS);
 		state.timer.unref?.();
@@ -617,8 +625,8 @@ export default function (pi: ExtensionAPI) {
 			finishRun(state, run);
 			// One pass, and it refreshes the token totals too — compaction rewrites those, and
 			// reading only activity + contextTokens left the card showing pre-compaction counts.
-			const compacted = readChildSession(run.sessionFile);
-			state.activity = ActivityLog.parse(compacted.activity);
+			const compacted = readChildSession(run.sessionFile, ACTIVITY_HISTORY, ACTIVITY_HISTORY_CHARS);
+			state.activity = ActivityLog.parse(compacted.activity, ACTIVITY_HISTORY);
 			state.contextTokens = compacted.contextTokens ?? 0;
 			state.tokens = compacted.tokens;
 			updateWidget();
@@ -671,6 +679,33 @@ export default function (pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _update, ctx) { const { agent, task } = params as { agent: string; task: string }; const submitted = await submitAgent(agent, task, ctx); return { content: [{ type: "text", text: `${displayName(agent)} ${submitted.status === "steered" ? "steering accepted" : "is working in the background"}.` }], details: { agent, status: submitted.status } }; },
 		renderCall(args, theme) { const task = (args as any).task || ""; return new Text(theme.fg("toolTitle", theme.bold("dispatch_agent ")) + theme.fg("accent", (args as any).agent || "?") + theme.fg("dim", ` — ${task.slice(0, 60)}`), 0, 0); },
 		renderResult(result, _options, theme) { const details = result.details as any; return new Text(theme.fg("accent", `● ${details?.agent || "agent"}`) + theme.fg("dim", details?.status === "steered" ? " steering accepted" : " working..."), 0, 0); },
+	});
+	pi.registerTool({ name: "peek_agent", label: "Peek Agent",
+		description: "Read a child instance's activity log to see what it is doing, or why it is slow. This never prompts, steers, or interrupts the child, so use it — not dispatch_agent — for any status question. Returns its vitals, the tool call it is currently blocked on, and recent activity oldest-first. Defaults to the last few entries; raise `entries` freely to read further back, and set `withinSeconds` to look only at recent work.",
+		parameters: Type.Object({
+			agent: Type.String({ description: "Instance name to inspect" }),
+			entries: Type.Optional(Type.Integer({ description: `How many activity entries to return, newest last. Default ${PEEK_DEFAULT_ENTRIES}. Raise it freely to read further back \u2014 each instance keeps up to ${ACTIVITY_HISTORY} entries, and an oversized peek is trimmed to a character budget.` })),
+			withinSeconds: Type.Optional(Type.Integer({ description: "Only entries recorded in the last N seconds. Omit to read regardless of age." })),
+		}),
+		async execute(_id, params, _signal, _update, ctx) {
+			const { agent, entries, withinSeconds } = params as { agent: string; entries?: number; withinSeconds?: number };
+			const state = stateFor(agent);
+			if (!state) throw new Error(`Unknown dynamic instance "${agent}". Known instances: ${[...agentStates.values()].map(candidate => candidate.name).join(", ") || "none"}`);
+			if (state === rootAgent) throw new Error(`${displayName(state.name)} is the root agent — that is you, not a child to peek at`);
+			const fast = state.activeRun?.fast ?? effectiveFast(state, ctx);
+			const peeked = formatAgentPeek({
+				name: state.name, type: state.def.name, status: state.status, goal: state.goal, task: state.task,
+				model: formatAgentModelLabel(effectiveModel(state, ctx), fast), elapsed: state.elapsed, toolCount: state.toolCount,
+				contextTokens: state.contextTokens, contextWindow: state.contextWindow, lastWork: state.lastWork,
+				history: state.history, pendingOutcome: state.pendingOutcome,
+			}, state.activity.list(state.lastWork), {
+				limit: entries,
+				withinMs: withinSeconds === undefined ? undefined : Math.max(0, withinSeconds) * 1000,
+			});
+			return { content: [{ type: "text", text: peeked.text }], details: { agent: state.name, status: state.status, shown: peeked.selection.shown.length, total: peeked.selection.total } };
+		},
+		renderCall(args, theme) { return new Text(theme.fg("toolTitle", theme.bold("peek_agent ")) + theme.fg("accent", (args as any).agent || "?"), 0, 0); },
+		renderResult(result, _options, theme) { const details = result.details as any; return new Text(theme.fg("accent", `○ ${details?.agent || "agent"}`) + theme.fg("dim", ` ${details?.status ?? "?"} · ${details?.shown ?? 0}/${details?.total ?? 0} entries`), 0, 0); },
 	});
 	pi.registerTool({ name: "route_agent", label: "Route Agent", description: "Route a task to a predefined specialist. relation=related steers only the named running instance; relation=new never steers busy work and may reuse, spawn, or queue.", parameters: Type.Object({ type: Type.String({ description: "Predefined base agent type; custom is not allowed" }), task: Type.String({ description: "Focused task" }), relation: Type.String({ description: "related or new" }), approved: Type.Boolean({ description: "True only after explicit user approval for Iterate work" }), preferredInstance: Type.Optional(Type.String({ description: "Relevant instance; required for related follow-ups" })) }),
 		async execute(_id, params, _signal, _update, ctx) { const input = params as { type: string; task: string; relation: "related" | "new"; approved: boolean; preferredInstance?: string }; if (input.relation !== "related" && input.relation !== "new") throw new Error("relation must be related or new"); const routed = await routeTask(input.type, input.task, input.relation, input.approved, ctx, input.preferredInstance); const agent = (routed as any).state?.name; return { content: [{ type: "text", text: routed.status === "queued" ? `${displayName(input.type)} task queued.` : `${displayName(agent)} ${routed.status}.` }], details: routed.status === "queued" ? { status: routed.status, queueId: (routed as any).queue.id } : { status: routed.status, agent } }; },
@@ -928,7 +963,7 @@ export default function (pi: ExtensionAPI) {
 		lastStatusSnapshot = snapshot;
 		return { customType: "agent-team-status", content: `Live team status \u2014 this snapshot supersedes any earlier one:\n${snapshot}`, display: false, details: { instances: states.length } };
 	};
-	const delegationGuidance = "Consult the latest agent-team-status snapshot before delegation: steer a relevant running instance rather than starting duplicate work; choose an idle or done specialist for new work. Status is advisory\u2014dispatch_agent and runtime remain authoritative.";
+	const delegationGuidance = "Consult the latest agent-team-status snapshot before delegation: steer a relevant running instance rather than starting duplicate work; choose an idle or done specialist for new work. Status is advisory\u2014dispatch_agent and runtime remain authoritative.\nWhen the user asks what an instance is doing, how far along it is, or why it is taking so long, answer with peek_agent, which reads that instance's activity log without prompting or interrupting it. Never dispatch or steer an agent merely to ask for a status update: that costs it a turn and derails the work in progress.";
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (rootAgent) {
 			rootAgent.task = event.prompt; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens;

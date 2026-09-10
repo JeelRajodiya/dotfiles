@@ -17,7 +17,7 @@ assert.deepEqual(frontmatter("agents/orchestrator.md"), {
 	name: "orchestrator",
 	description: "User-facing coordinator with approval-gated implementation planning",
 	model: "openai-codex/gpt-5.6-sol",
-	tools: "dispatch_agent,route_agent,spawn_agent,kill_agent,interrupt_agent,set_agent_model",
+	tools: "dispatch_agent,peek_agent,route_agent,spawn_agent,kill_agent,interrupt_agent,set_agent_model",
 });
 const iterate = frontmatter("agents/iterate.md");
 assert.deepEqual({ model: iterate.model, thinking: iterate.thinking, fast: iterate.fast }, {
@@ -38,8 +38,11 @@ assert.match(orchestrator, /Ask for explicit confirmation and wait for it before
 assert.match(read("agents/iterate.md"), /wait for renewed user approval before changing scope\./);
 assert.equal(frontmatter("agents/reviewer.md").model, "openai-codex/gpt-5.6-sol");
 assert.match(agentTeam, /const DEFAULT_TEAM = "default"/);
-assert.match(agentTeam, /const TEAM_TOOLS = \["dispatch_agent", "route_agent", "spawn_agent", "kill_agent", "interrupt_agent", "set_agent_model"\]/);
+assert.match(agentTeam, /const TEAM_TOOLS = \["dispatch_agent", "peek_agent", "route_agent", "spawn_agent", "kill_agent", "interrupt_agent", "set_agent_model"\]/);
 assert.match(agentTeam, /rootAgent \? TEAM_TOOLS : agentStates\.size \? TEAM_TOOLS : undefined/);
 assert.match(agentTeam, /agent-team-routing/);
 assert.match(agentTeam, /relation=related steers only the named running instance/);
+assert.match(orchestrator, /answer with peek_agent: it reads that instance's activity log without prompting it\./);
+assert.match(orchestrator, /Never dispatch or steer a running agent just to request a status update\./);
+assert.match(agentTeam, /Never dispatch or steer an agent merely to ask for a status update/);
 console.log("agent-team default configuration check passed");
