@@ -8,8 +8,10 @@
  */
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
 import { clearedPlaceholder, estimateResultTokens, planClears, type ToolOutputResult } from "./lib/tool-output-budget.ts";
 import { middleOutFile, withTruncationNotice } from "./lib/tool-output-shape.ts";
+import { findCutIndex, formatRemaining, planNewContext } from "./lib/context-window.ts";
 
 interface TruncatedDetails {
 	truncation?: { truncated?: boolean };
@@ -20,8 +22,42 @@ export default function toolOutputBudget(pi: ExtensionAPI) {
 	// Keyed by tool call rather than position: compaction renumbers history, and a result that has
 	// been cleared must stay cleared or the cached prefix would flip back and forth.
 	let cleared = new Set<string>();
+	let reset: { toolCallId: string; carryOver: string } | undefined;
 	pi.on("session_start", () => {
 		cleared = new Set();
+		reset = undefined;
+	});
+
+	pi.registerTool({
+		name: "get_context_remaining",
+		label: "Context Remaining",
+		description: "Report how many tokens are left in the current context window.",
+		parameters: Type.Object({}),
+		async execute(_id, _params, _signal, _update, ctx) {
+			const usage = ctx.getContextUsage();
+			const text = usage ? formatRemaining(usage.tokens, usage.contextWindow) : "Context usage is unavailable for this model.";
+			return { content: [{ type: "text" as const, text }], details: usage };
+		},
+	});
+
+	pi.registerTool({
+		name: "new_context",
+		label: "New Context",
+		description: "Start a new context window, keeping only what you carry over. Shell state, working directory and files are untouched. Use it when you have finished a phase of work and the earlier detail no longer matters.",
+		parameters: Type.Object({
+			carry_over: Type.String({ description: "Everything that must survive: the task you were given, findings so far, decisions taken, what is left to do. Anything you omit is gone." }),
+		}),
+		async execute(id, params, _signal, _update, ctx) {
+			const carryOver = (params as { carry_over: string }).carry_over.trim();
+			if (!carryOver) throw new Error("carry_over cannot be empty; state what should survive the reset");
+			// Only the newest reset matters: an older cut point is always inside the range this one drops.
+			reset = { toolCallId: id, carryOver };
+			const usage = ctx.getContextUsage();
+			return {
+				content: [{ type: "text" as const, text: `Context reset. Earlier turns are no longer visible; your carry-over note stands in for them.${usage?.tokens ? ` Released roughly ${usage.tokens} tokens.` : ""}` }],
+				details: { carriedOverChars: carryOver.length },
+			};
+		},
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
@@ -41,12 +77,16 @@ export default function toolOutputBudget(pi: ExtensionAPI) {
 	});
 
 	pi.on("context", event => {
-		const results = event.messages.filter(message => message.role === "toolResult") as unknown as ToolOutputResult[];
-		if (!results.length) return;
+		let outgoing = event.messages;
+		if (reset) {
+			const cutIndex = findCutIndex(outgoing, reset.toolCallId);
+			if (cutIndex === -1) reset = undefined;
+			else outgoing = planNewContext(outgoing, cutIndex, reset.carryOver);
+		}
+		const results = outgoing.filter(message => message.role === "toolResult") as unknown as ToolOutputResult[];
 		for (const id of planClears(results, cleared)) cleared.add(id);
-		if (!cleared.size) return;
-		let changed = false;
-		const messages = event.messages.map(message => {
+		let changed = outgoing !== event.messages;
+		const messages = outgoing.map(message => {
 			const result = message as unknown as ToolOutputResult;
 			if (message.role !== "toolResult" || !cleared.has(result.toolCallId)) return message;
 			changed = true;

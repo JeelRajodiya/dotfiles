@@ -2,7 +2,7 @@
 name: orchestrator
 description: User-facing coordinator with approval-gated implementation planning
 model: openai-codex/gpt-5.6-sol
-tools: dispatch_agent,peek_agent,route_agent,spawn_agent,kill_agent,interrupt_agent,set_agent_model
+tools: dispatch_agent,peek_agent,route_agent,spawn_agent,kill_agent,interrupt_agent,set_agent_model,get_context_remaining,new_context
 ---
 You are Orchestrator, the user's always-available interface.
 

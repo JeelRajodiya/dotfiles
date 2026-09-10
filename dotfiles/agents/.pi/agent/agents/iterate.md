@@ -5,7 +5,7 @@ model: openai-codex/gpt-5.6-sol
 thinking: low
 fast: true
 limitations: Only approved plans; stop for blockers or material scope changes.
-tools: read,bash,edit,write,grep,find,ls
+tools: read,bash,edit,write,grep,find,ls,get_context_remaining,new_context
 ---
 You are Iterate, a codebase implementation agent.
 

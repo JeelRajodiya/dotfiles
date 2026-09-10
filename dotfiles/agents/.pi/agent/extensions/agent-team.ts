@@ -34,7 +34,7 @@ type QueueItem = { id: string; type: string; instance?: string; task: string; ap
 type SavedRouting = { autoSpawn?: boolean; limit?: number; queue?: QueueItem[] };
 type LegacyTeamMode = { team?: string | null };
 
-const TEAM_TOOLS = ["dispatch_agent", "peek_agent", "route_agent", "spawn_agent", "kill_agent", "interrupt_agent", "set_agent_model"];
+const TEAM_TOOLS = ["dispatch_agent", "peek_agent", "route_agent", "spawn_agent", "kill_agent", "interrupt_agent", "set_agent_model", "get_context_remaining", "new_context"];
 const DEFAULT_TEAM = "default";
 const DEFAULT_AUTO_SPAWN_LIMIT = 3;
 const MAX_KEPT_SESSIONS = 20;
