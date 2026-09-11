@@ -15,7 +15,7 @@ import {
 } from "./agent-team-helpers.ts";
 import { ActivityLog, formatActivityDuration, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity.ts";
 import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs.ts";
-import { displayName, FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } from "./lib/agent-render.ts";
+import { CallLine, callTail, displayName, FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } from "./lib/agent-render.ts";
 
 interface ActiveAgentRun {
 	child: ChildProcessWithoutNullStreams; transport: AgentRpcTransport; text: TextTail; stderrChunks: string[]; initialTask: string; tasks: string[];
@@ -686,7 +686,7 @@ export default function (pi: ExtensionAPI) {
 			const target = stateFor(agent);
 			if (target && key(target.def.name) === "worker" && !approved) throw new Error("Worker tasks require explicit user approval before dispatch or queueing");
 			const submitted = await submitAgent(agent, task, ctx); return { content: [{ type: "text", text: `${displayName(agent)} ${submitted.status === "steered" ? "steering accepted" : "is working in the background"}. Its result arrives on its own in a later turn \u2014 end your turn now rather than waiting or polling for it.` }], details: { agent, status: submitted.status } }; },
-		renderCall(args, theme) { const task = (args as any).task || ""; return new Text(theme.fg("toolTitle", theme.bold("dispatch_agent ")) + theme.fg("accent", (args as any).agent || "?") + theme.fg("dim", ` — ${task.slice(0, 60)}`), 0, 0); },
+		renderCall(args, theme) { return new CallLine(theme.fg("toolTitle", theme.bold("dispatch_agent ")) + theme.fg("accent", (args as any).agent || "?"), theme.fg("dim", callTail((args as any).task))); },
 		renderResult(result, _options, theme) { const details = result.details as any; return new Text(theme.fg("accent", `● ${details?.agent || "agent"}`) + theme.fg("dim", details?.status === "steered" ? " steering accepted" : " working..."), 0, 0); },
 	});
 	pi.registerTool({ name: "peek_agent", label: "Peek Agent",

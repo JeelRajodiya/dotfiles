@@ -2,9 +2,9 @@
  * Everything the agent-team widget draws. Pure functions over a view model, so the layout
  * can be exercised without spawning a child agent or standing up a Pi session.
  */
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { formatAgentModelLabel, formatAgentContext, formatAgentTokens, type TokenCounts } from "../agent-team-helpers.ts";
-import { activityStartedAt, formatActivityDuration, isActivityRunning, thoughtActivityLabel, type ActivityEntry } from "./agent-activity.ts";
+import { activityStartedAt, cleanActivity, formatActivityDuration, isActivityRunning, thoughtActivityLabel, type ActivityEntry } from "./agent-activity.ts";
 
 export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
 
@@ -102,6 +102,33 @@ export function renderCard(agent: RenderableAgent, width: number, theme: Theme, 
 	return [rule("╭", "╮"), row(identity), row(theme.fg("dim", usage)), rule("╰", "╯")].map(line => truncateToWidth(line, cardWidth));
 }
 
+/**
+ * A tool-call header that is one line wide and terminal-wide.
+ *
+ * `Text` word-wraps, so a long task spills down the pane instead of stopping; cutting the task
+ * to a fixed character count instead throws away whatever width the terminal actually has. This
+ * gets the real width at render time and spends all of it, keeping the head — tool name and
+ * instance — whole and letting only the tail give ground.
+ */
+export class CallLine implements Component {
+	private readonly head: string;
+	private readonly tail: string;
+
+	constructor(head: string, tail = "") {
+		this.head = head;
+		this.tail = tail;
+	}
+
+	render(width: number): string[] {
+		const room = width - visibleWidth(this.head);
+		// Too narrow even for the head: cut that rather than render past the edge.
+		return [room <= 0 ? truncateToWidth(this.head, Math.max(0, width), "…") : this.head + truncateToWidth(this.tail, room, "…")];
+	}
+
+	/** Nothing is cached between renders, so there is nothing to drop. */
+	invalidate(): void {}
+}
+
 /** Lay cards out in up to `columns` columns, dropping to fewer when the terminal is narrow. */
 export function renderGrid(agents: RenderableAgent[], width: number, columns: number, theme: Theme, now?: number): string[] {
 	const renderWidth = Math.max(1, width);
@@ -118,6 +145,12 @@ export function renderGrid(agents: RenderableAgent[], width: number, columns: nu
 	}
 	return rows;
 }
+
+/** The dispatched task as a single line: a plan arrives with newlines and indentation in it. */
+export const callTail = (task: unknown): string => {
+	const text = cleanActivity(task);
+	return text ? ` — ${text}` : "";
+};
 
 export function renderEmpty(width: number, theme: Theme): string {
 	return theme.fg("dim", truncateToWidth("○ No instances · /agents add <type> [name] to build a team", Math.max(1, width)));

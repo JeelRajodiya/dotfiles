@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { parseAgentMarkdown, parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
 import { canClearAgent, canCompactAgent, canSteerAgent, formatAgentModelLabel, formatToolActivity, instanceSuffix, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, readChildSession, resolveAgentThinking, resultDeliveryStatus, runConcurrent, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { displayName, renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
+import { CallLine, callTail, displayName, renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
 import { ActivityLog } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-activity.ts";
 
 assert.deepEqual(parseTeams("flat:\n  - planner\n  - builder\nrooted:\n  main: understand\n  subs:\n    - iterate\n"), {
@@ -89,6 +89,18 @@ assert.equal(elapsedCard.length, 4);
 assert.match(elapsedCard[1], /7 · 12s/);
 const longRunCard = renderCard({ ...elapsedAgent, elapsed: 210_000 }, 80, plainTheme);
 assert.match(longRunCard[1], /3m30s/, "a run past a minute reads in minutes, not 210s");
+
+// The dispatch header spends the terminal it is given, and never more than one line of it.
+const header = "dispatch_agent tracer";
+const longTask = callTail("Trace every caller of submitAgent and report each one as file:line, oldest first.");
+for (const width of [200, 120, 60, 24, 10]) {
+	const lines = new CallLine(header, longTask).render(width);
+	assert.equal(lines.length, 1, `a ${width}-column header wraps instead of truncating`);
+	assert.ok(visibleWidth(lines[0]) <= width, `a ${width}-column header overflows to ${visibleWidth(lines[0])}`);
+}
+assert.equal(new CallLine(header, longTask).render(200)[0], `${header}${longTask}`, "a task that fits is not cut short of the terminal");
+assert.equal(new CallLine(header, callTail(undefined)).render(60)[0], header, "no task leaves no dangling separator");
+assert.equal(callTail("Line one.\n\n  - step two"), " — Line one. - step two", "a multi-line plan is flattened before it is drawn");
 assert.match(elapsedCard[2], /gpt-5.6-sol \(fast\) · high/);
 
 const waitingCard = renderCard({
