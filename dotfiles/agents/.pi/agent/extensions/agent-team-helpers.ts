@@ -239,9 +239,16 @@ export function addTokenCounts(total: TokenCounts, next: TokenCounts | undefined
 	return next ? { input: total.input + next.input, output: total.output + next.output } : total;
 }
 
-/** 1234 -> "1k", 999 -> "999". Shared by the context and token readouts. */
-export const formatCompactCount = (value: number) =>
-	value >= 1000 ? `${Math.round(value / 1000)}k` : `${Math.round(value)}`;
+/** 999 -> "999", 1234 -> "1k", 2_480_000 -> "2.5M". Shared by the context and token readouts. */
+export const formatCompactCount = (value: number) => {
+	if (value < 1000) return `${Math.round(value)}`;
+	// Promote on the rounded figure, so 999_600 reads "1M" rather than "1000k".
+	const thousands = Math.round(value / 1000);
+	if (thousands < 1000) return `${thousands}k`;
+	// Millions keep one decimal while the leading digit is alone: "1M" would hide half of 1.5M.
+	const millions = value / 1_000_000;
+	return `${millions >= 10 ? Math.round(millions) : Number(millions.toFixed(1))}M`;
+};
 
 export function formatAgentTokens(tokens: TokenCounts): string {
 	return `↑${formatCompactCount(tokens.input)} ↓${formatCompactCount(tokens.output)}`;
