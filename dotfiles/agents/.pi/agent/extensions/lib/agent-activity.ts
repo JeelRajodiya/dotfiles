@@ -57,9 +57,12 @@ export function mergeThoughtActivity(previous: string, next: string): string {
 	return `${previous} ${next}`;
 }
 
+/** Rolls up at every 60, so a long run reads "4m12s" or "2h07m" rather than "252s" or "127m". */
 export function formatActivityDuration(durationMs: number): string {
 	const seconds = Math.max(0, Math.floor(durationMs / 1000));
 	const minutes = Math.floor(seconds / 60);
+	const hours = Math.floor(minutes / 60);
+	if (hours) return `${hours}h${String(minutes % 60).padStart(2, "0")}m`;
 	return minutes ? `${minutes}m${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
 }
 

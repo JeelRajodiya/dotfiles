@@ -13,7 +13,7 @@ import {
 	restoreWaitingAgents, tokenCountsFromUsage, shouldCompleteTellTarget, shouldFinalizeAgentEvent,
 	terminateChild, type AgentCompletionStatus, type AgentOrigin, type TaskHistoryEntry, type TokenCounts,
 } from "./agent-team-helpers.ts";
-import { ActivityLog, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity.ts";
+import { ActivityLog, formatActivityDuration, OutputBuffer, TextTail, type ActivityKind } from "./lib/agent-activity.ts";
 import { CUSTOM_AGENT, scanAgentDirs, scanTeams, type AgentDef, type TeamDef } from "./lib/agent-defs.ts";
 import { displayName, FRAME_MS, renderDetail, renderEmpty, renderGrid, type AgentStatus } from "./lib/agent-render.ts";
 
@@ -411,7 +411,7 @@ export default function (pi: ExtensionAPI) {
 			const truncated = run.output.wasTruncated ? "\n\n(child output truncated)" : "";
 			const result = error ? error.message : output ? `${output}${truncated}` : "(no output)";
 			pi.sendMessage({ customType: "agent-team-result", content: `Private result from ${state.name} (${state.def.name}) for ${run.initialTask}:\n${result}`, display: false, details: { agent: state.name, status: outcome, elapsed: state.elapsed } }, { deliverAs: "followUp", triggerTurn: true });
-			widgetCtx?.ui.notify(`${displayName(state.name)} ${state.status === "waiting" ? `is returning its ${outcome} result` : outcome} in ${Math.round(state.elapsed / 1000)}s`, error ? "error" : "info");
+			widgetCtx?.ui.notify(`${displayName(state.name)} ${state.status === "waiting" ? `is returning its ${outcome} result` : outcome} in ${formatActivityDuration(state.elapsed)}`, error ? "error" : "info");
 		}
 		terminateRun(run);
 	}

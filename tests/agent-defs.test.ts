@@ -79,13 +79,16 @@ const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: st
 // The cards render the display form too, not just the detail pane.
 const card = renderCard({ name: "tracer-b", def: { name: "tracer", description: "" }, goal: "", task: "", status: "idle", toolCount: 0, elapsed: 0, contextTokens: 0, contextWindow: 500_000, tokens: { input: 0, output: 0 }, model: "test/model" }, 40, plainTheme, 0).join(" ");
 assert.match(card.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, ""), /Tracer B/, "cards show the spaced, capitalised form");
-const elapsedCard = renderCard({
-	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "done",
+const elapsedAgent = {
+	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "done" as const,
 	model: "openai-codex/gpt-5.6-sol", fast: true, thinking: "high", toolCount: 7, elapsed: 12_000, contextTokens: 0,
 	contextWindow: 0, tokens: { input: 1_200, output: 300 },
-}, 80, plainTheme);
+};
+const elapsedCard = renderCard(elapsedAgent, 80, plainTheme);
 assert.equal(elapsedCard.length, 4);
 assert.match(elapsedCard[1], /7 · 12s/);
+const longRunCard = renderCard({ ...elapsedAgent, elapsed: 210_000 }, 80, plainTheme);
+assert.match(longRunCard[1], /3m30s/, "a run past a minute reads in minutes, not 210s");
 assert.match(elapsedCard[2], /gpt-5.6-sol \(fast\) · high/);
 
 const waitingCard = renderCard({

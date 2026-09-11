@@ -86,7 +86,7 @@ export function renderCard(agent: RenderableAgent, width: number, theme: Theme, 
 	const name = `${theme.fg(statusColor(agent.status), statusGlyph(agent.status, now))} ${theme.bold(theme.fg("accent", displayName(agent.name)))}${label}`;
 	const context = theme.fg(contextColor(agent), formatAgentContext(agent.contextTokens, agent.contextWindow));
 	const waiting = agent.status === "waiting" ? agent.pendingOutcome === "error" ? "return error" : "returning" : "";
-	const elapsed = agent.status === "running" || agent.elapsed ? `${Math.round(agent.elapsed / 1000)}s` : "";
+	const elapsed = agent.status === "running" || agent.elapsed ? formatActivityDuration(agent.elapsed) : "";
 	const telemetry = [agent.toolCount || "", waiting, elapsed].filter(Boolean).join(" · ");
 	// On narrow cards, keep the waiting/elapsed state before a tool count that would crowd it out.
 	const vital = visibleWidth(telemetry) <= inner - 4 ? telemetry : waiting || elapsed || truncateToWidth(String(agent.toolCount), Math.max(1, inner - 4));
@@ -152,7 +152,7 @@ export function renderDetail(agent: RenderableAgent, width: number, theme: Theme
 	const meta = [
 		agent.status === "waiting" && agent.pendingOutcome ? `${agent.status} (${agent.pendingOutcome} queued)` : agent.status,
 		options.model,
-		`${Math.round(agent.elapsed / 1000)}s`,
+		formatActivityDuration(agent.elapsed),
 	].join(" · ");
 
 	const activity = options.activity.map(entry => renderActivityLine(entry, width, theme, now));
