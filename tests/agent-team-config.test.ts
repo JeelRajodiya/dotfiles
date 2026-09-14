@@ -17,7 +17,7 @@ assert.deepEqual(frontmatter("agents/orchestrator.md"), {
 	name: "orchestrator",
 	description: "User-facing coordinator with approval-gated implementation planning",
 	model: "openai-codex/gpt-5.6-sol",
-	tools: "dispatch_agent,peek_agent,route_agent,spawn_agent,kill_agent,interrupt_agent,set_agent_model,get_context_remaining,new_context",
+	tools: "dispatch_agent,peek_agent,route_agent,spawn_agent,kill_agent,interrupt_agent,set_agent_model,get_context_remaining,new_context,read,bash",
 });
 const worker = frontmatter("agents/worker.md");
 assert.deepEqual({ model: worker.model, thinking: worker.thinking, fast: worker.fast }, {
@@ -48,7 +48,7 @@ assert.match(orchestrator, /Ask for explicit confirmation and wait for it before
 assert.match(read("agents/worker.md"), /wait for renewed user approval before changing scope\./);
 assert.equal(frontmatter("agents/reviewer.md").model, "openai-codex/gpt-5.6-sol");
 assert.match(agentTeam, /const DEFAULT_TEAM = "default"/);
-assert.match(agentTeam, /const TEAM_TOOLS = \["dispatch_agent", "peek_agent", "route_agent", "spawn_agent", "kill_agent", "interrupt_agent", "set_agent_model", "get_context_remaining", "new_context"\]/);
+assert.match(agentTeam, /const TEAM_TOOLS = \["dispatch_agent", "peek_agent", "route_agent", "spawn_agent", "kill_agent", "interrupt_agent", "set_agent_model", "get_context_remaining", "new_context", "read", "bash"\]/);
 assert.match(agentTeam, /rootAgent \? TEAM_TOOLS : agentStates\.size \? TEAM_TOOLS : undefined/);
 assert.match(agentTeam, /agent-team-routing/);
 // The approval gate has to cover every path into Worker. route_agent and spawn_agent take an
