@@ -7,7 +7,8 @@
     "editorGitBranch": "syntaxKeyword",
     "editorModel": "syntaxFunction",
     "editorThinkingMedium": "thinkingText",
-    "gitStatus": "error"
+    "gitStatus": "error",
+    "sessionDuration": "bold accent"
   },
   "components": {
     "editor": {
