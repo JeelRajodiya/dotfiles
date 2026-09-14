@@ -52,6 +52,30 @@ function joinStatusTexts(statusTexts: string[], separator: string): string {
 	return statusTexts.filter(Boolean).join(separator);
 }
 
+export function formatFooterCostLabel(
+	sessionCost: string,
+	monthlyStatus: string | undefined,
+): string {
+	const cost = sanitizeExtensionStatusText(sessionCost);
+	const monthly = sanitizeExtensionStatusText(monthlyStatus ?? "").match(
+		/^(.*?) \(this month\)$/,
+	)?.[1];
+	return cost && monthly ? `${cost} (${monthly} mo)` : cost;
+}
+
+export function insertFooterCostBeforeCodex(
+	segments: ExtensionStatusSegment[],
+	costLabel: string,
+): ExtensionStatusSegment[] {
+	const codexIndex = segments.findIndex(({ key }) => key === "codex-usage");
+	if (!costLabel || codexIndex < 0) return segments;
+	return [
+		...segments.slice(0, codexIndex),
+		{ ...segments[codexIndex], key: "zentui-footer-cost", text: costLabel, colorMode: "zentui" },
+		...segments.slice(codexIndex),
+	];
+}
+
 function normalizeModelInfoPart(value: string): string {
 	return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
@@ -210,6 +234,7 @@ export function installFooter(
 				if (width <= 0) return [""];
 				const config = getConfig();
 				const footer = config.components.footer;
+				const rawExtensionStatuses = footerData.getExtensionStatuses();
 				const footerModelLabel = modelLabelFor(state, footer.modelLabel);
 				const wideFormatTokens = config.components.footer.styles.starship.format
 					? parseFooterFormat(config.components.footer.styles.starship.format)
@@ -256,11 +281,12 @@ export function installFooter(
 							version: sanitizeEditorMetadataText(state.packageVersion.version),
 						}
 					: undefined;
+				const plainSeparator = separatorText[config.components.footer.styles.starship.separator];
 				const separator = renderStyleForSource(
 					theme,
 					colorSource,
 					config.colors.separator,
-					separatorText[config.components.footer.styles.starship.separator],
+					plainSeparator,
 				);
 				const innerWidth = Math.max(1, width - 2);
 				const cwdLabel = renderStyleForSource(theme, colorSource, config.colors.cwd, formattedCwd);
@@ -451,7 +477,7 @@ export function installFooter(
 									)
 								: "";
 						case "sep":
-							return renderStyleForSource(theme, colorSource, config.colors.separator, " | ");
+							return separator;
 						case "git_commit":
 							return formatGitCommitSegment(
 								theme,
@@ -674,17 +700,34 @@ export function installFooter(
 					contentRight = stripOrphanSeparators(fmtRight);
 				}
 
-				const extensionStatuses = collectExtensionStatusSegments(
-					footerData.getExtensionStatuses(),
-					config,
+				const extensionStatuses = collectExtensionStatusSegments(rawExtensionStatuses, config);
+				const costLabel = formatFooterCostLabel(
+					state.costLabel,
+					rawExtensionStatuses.get("monthly-cost"),
 				);
 				const renderExtensionStatus = (segment: ExtensionStatusSegment) =>
-					segment.colorMode === "original"
-						? segment.text
-						: renderStyleForSource(theme, colorSource, config.colors.extensionStatus, segment.text);
-				const extensionLeftSegments = extensionStatuses.left.map(renderExtensionStatus);
-				const extensionMiddleSegments = extensionStatuses.middle.map(renderExtensionStatus);
-				const extensionRightSegments = extensionStatuses.right.map(renderExtensionStatus);
+					segment.key === "zentui-footer-cost"
+						? theme.fg("dim", segment.text)
+						: segment.colorMode === "original"
+							? segment.text
+							: renderStyleForSource(
+									theme,
+									colorSource,
+									config.colors.extensionStatus,
+									segment.text,
+								);
+				const extensionLeftSegments = insertFooterCostBeforeCodex(
+					extensionStatuses.left,
+					costLabel,
+				).map(renderExtensionStatus);
+				const extensionMiddleSegments = insertFooterCostBeforeCodex(
+					extensionStatuses.middle,
+					costLabel,
+				).map(renderExtensionStatus);
+				const extensionRightSegments = insertFooterCostBeforeCodex(
+					extensionStatuses.right,
+					costLabel,
+				).map(renderExtensionStatus);
 				const usesCustomFormat = Boolean(config.components.footer.styles.starship.format);
 				if (!usesCustomFormat && extensionRightSegments.length > 0) {
 					contentRight = [
@@ -803,7 +846,7 @@ export function installFooter(
 						for (const [index, text] of statuses.entries()) {
 							compactChunks.push({
 								text,
-								boundary: index === 0 ? chunk.boundary : "space",
+								boundary: index === 0 ? chunk.boundary : "separator",
 							});
 						}
 						continue;

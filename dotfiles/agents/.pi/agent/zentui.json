@@ -83,7 +83,7 @@
           "responsive": true,
           "compactFormat": "$cwd$wrap(in $session_name)$wrap(on $git_branch) $git_status$wrap$context$wrap_sep$tokens",
           "compactMaxLines": 2,
-          "separator": "pipe",
+          "separator": "dot",
           "contextStyle": "text",
           "contextThresholds": {
             "warning": 70,
