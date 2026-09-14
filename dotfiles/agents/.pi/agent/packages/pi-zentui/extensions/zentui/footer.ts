@@ -38,6 +38,7 @@ import {
 } from "./format";
 import { resolveRuntimeSymbol } from "./icons";
 import type { LiveContextOverride } from "./live-context";
+import { renderMinimalistModelThinking } from "./minimalist-editor";
 import { type FooterState, modelLabelFor } from "./state";
 import { renderStyleForSource } from "./style";
 
@@ -71,21 +72,14 @@ export function insertFooterCostBeforeCodex(
 	if (!costLabel || codexIndex < 0) return segments;
 	return [
 		...segments.slice(0, codexIndex),
-		{ ...segments[codexIndex], key: "zentui-footer-cost", text: costLabel, colorMode: "zentui" },
+		{
+			...segments[codexIndex],
+			key: "zentui-footer-cost",
+			text: costLabel,
+			colorMode: "zentui",
+		},
 		...segments.slice(codexIndex),
 	];
-}
-
-function normalizeModelInfoPart(value: string): string {
-	return value.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function composeModelInfoLabel(model: string, provider: string): string {
-	const normalizedModel = normalizeModelInfoPart(model);
-	const normalizedProvider = normalizeModelInfoPart(provider);
-	const providerIsDuplicated =
-		normalizedProvider.length > 0 && normalizedModel.includes(normalizedProvider);
-	return [model, providerIsDuplicated ? "" : provider].filter(Boolean).join(" ");
 }
 
 function fitStatusTexts(statusTexts: string[], maxWidth: number, separator: string): string {
@@ -211,6 +205,7 @@ export function installFooter(
 		scheduleProjectRefresh: (ctx: ExtensionContext) => void;
 		setExtensionStatusesGetter?: (fn: (() => ReadonlyMap<string, string>) | undefined) => void;
 		getLiveContext?: () => LiveContextOverride | undefined;
+		getThinkingLevel?: () => string | undefined;
 		onDispose?: () => void;
 	},
 ): void {
@@ -644,9 +639,10 @@ export function installFooter(
 					.join(" ");
 
 				const modelInfoSegment = config.components.footer.styles.starship.segments.modelInfo
-					? composeModelInfoLabel(
-							sanitizeExtensionStatusText(footerModelLabel),
-							sanitizeExtensionStatusText(state.providerLabel),
+					? renderMinimalistModelThinking(
+							{ cwd: "", modelLabel: footerModelLabel, thinkingLevel: hooks.getThinkingLevel?.() },
+							theme,
+							config,
 						)
 					: "";
 				const timeSegment = config.components.footer.styles.starship.segments.time
@@ -677,7 +673,6 @@ export function installFooter(
 					.filter(Boolean)
 					.join(" ");
 				const right = [
-					modelInfoSegment,
 					config.components.footer.styles.starship.segments.context ? builtInContextLabel : "",
 					config.components.footer.styles.starship.segments.tokens ? builtInTokenLabel : "",
 					config.components.footer.styles.starship.segments.cost ? builtInCostLabel : "",
@@ -689,7 +684,8 @@ export function installFooter(
 				let contentLeft = left;
 				let contentMiddle = "";
 				let contentRight = right;
-				if (config.components.footer.styles.starship.format) {
+				const usesCustomFormat = Boolean(config.components.footer.styles.starship.format);
+				if (usesCustomFormat) {
 					const {
 						left: fmtLeft,
 						middle: fmtMiddle,
@@ -698,6 +694,9 @@ export function installFooter(
 					contentLeft = stripOrphanSeparators(fmtLeft);
 					contentMiddle = stripOrphanSeparators(fmtMiddle);
 					contentRight = stripOrphanSeparators(fmtRight);
+				}
+				if (!usesCustomFormat) {
+					contentLeft = prependStatusArea(contentLeft, modelInfoSegment, separator);
 				}
 
 				const extensionStatuses = collectExtensionStatusSegments(rawExtensionStatuses, config);
@@ -728,10 +727,8 @@ export function installFooter(
 					extensionStatuses.right,
 					costLabel,
 				).map(renderExtensionStatus);
-				const usesCustomFormat = Boolean(config.components.footer.styles.starship.format);
 				if (!usesCustomFormat && extensionRightSegments.length > 0) {
 					contentRight = [
-						modelInfoSegment,
 						config.components.footer.styles.starship.segments.context
 							? builtInContextLabel
 							: "",

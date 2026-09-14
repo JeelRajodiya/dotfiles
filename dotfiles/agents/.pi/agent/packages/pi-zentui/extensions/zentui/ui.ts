@@ -21,6 +21,39 @@ import {
 } from "./style";
 
 const LEGACY_SPLIT_POLISHED_FRAME = Symbol.for("pi-zentui.polished-frame");
+const MINIMALIST_VIEWPORT_TERMINAL_ROWS = 36;
+
+const bindProxyValue = (target: object, property: PropertyKey) => {
+	const value = Reflect.get(target, property, target);
+	return typeof value === "function" ? value.bind(target) : value;
+};
+
+export function createMinimalistViewportTui(
+	tui: TUI,
+	getConfig: () => ZentuiConfig,
+): TUI {
+	const terminal = new Proxy(tui.terminal, {
+		get(target, property) {
+			if (property === "rows") {
+				const config = getConfig();
+				if (
+					config.components.editor.enabled &&
+					config.components.editor.style === "minimalist"
+				) {
+					return Math.min(target.rows, MINIMALIST_VIEWPORT_TERMINAL_ROWS);
+				}
+			}
+			return bindProxyValue(target, property);
+		},
+	});
+	return new Proxy(tui, {
+		get(target, property) {
+			return property === "terminal"
+				? terminal
+				: bindProxyValue(target, property);
+		},
+	});
+}
 
 export type ViewportCounts = {
 	above?: string;

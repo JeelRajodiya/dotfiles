@@ -84,7 +84,11 @@ import { installThinkingTimer, settleThinkingTimers } from "./thinking-timer";
 import { registerZentuiSettingsCommand } from "./settings-command";
 import { createInitialState, type FooterState, modelLabelFor, syncState } from "./state";
 import { resolveFooterTelemetry } from "./telemetry";
-import { PolishedEditor, WrappedPolishedEditor } from "./ui";
+import {
+	createMinimalistViewportTui,
+	PolishedEditor,
+	WrappedPolishedEditor,
+} from "./ui";
 import { installUserMessageStyle, removeUserMessageStyle } from "./user-message";
 import {
 	AgentDurationClock,
@@ -699,7 +703,7 @@ export default function (pi: ExtensionAPI) {
 			requestEditorRender = () => tui.requestRender();
 			return markOwnedAccentRailEditor(
 				new PolishedEditor(
-					tui,
+					createMinimalistViewportTui(tui, getCurrentConfig),
 					theme,
 					keybindings,
 					sessionTheme,
@@ -719,8 +723,6 @@ export default function (pi: ExtensionAPI) {
 						dirty: state.dirty,
 						ahead: state.ahead,
 						behind: state.behind,
-						modelLabel: modelLabelFor(state, currentConfig.components.editor.modelLabel),
-						thinkingLevel: getThinkingLevel(),
 						contextPercent: getContextPercent(ctx),
 						contextTokens: getContextTokens(ctx),
 						contextWindow: getContextWindow(ctx),
@@ -747,7 +749,11 @@ export default function (pi: ExtensionAPI) {
 			requestEditorRender = () => tui.requestRender();
 			return markOwnedAccentRailEditor(
 				new WrappedPolishedEditor(
-					baseFactory(tui, theme, keybindings),
+					baseFactory(
+						createMinimalistViewportTui(tui, getCurrentConfig),
+						theme,
+						keybindings,
+					),
 					sessionTheme,
 					getCurrentConfig,
 					() => ({
@@ -765,8 +771,6 @@ export default function (pi: ExtensionAPI) {
 						dirty: state.dirty,
 						ahead: state.ahead,
 						behind: state.behind,
-						modelLabel: modelLabelFor(state, currentConfig.components.editor.modelLabel),
-						thinkingLevel: getThinkingLevel(),
 						contextPercent: getContextPercent(ctx),
 						contextTokens: getContextTokens(ctx),
 						contextWindow: getContextWindow(ctx),
@@ -926,6 +930,7 @@ export default function (pi: ExtensionAPI) {
 					getActiveExtensionStatuses = fn ?? (() => new Map());
 				},
 				getLiveContext: () => liveContext.get(),
+				getThinkingLevel,
 				onDispose: () => clearFooterOwnership(ctx, token),
 			});
 			installedFooterKind = "starship";

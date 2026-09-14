@@ -268,12 +268,19 @@ function renderGitMetadata(
 	return parts.join(" ");
 }
 
-function renderBottomLeft(
+export function renderMinimalistModelThinking(
 	metadata: MinimalistEditorMetadata,
 	uiTheme: Theme,
 	config: ZentuiConfig,
-	renderBorder: (text: string) => string,
-	renderThinking: (text: string) => string,
+	renderBorder: (text: string) => string = (text) =>
+		renderStyleForSourceOrFallback(
+			uiTheme,
+			config.components.editor.colorSource,
+			config.colors.editorModel,
+			MINIMALIST_MODEL_FALLBACK,
+			text,
+		),
+	renderThinking: (text: string) => string = (text) => safeThemeFg(uiTheme, "muted", text),
 ): string {
 	const source = config.components.editor.colorSource;
 	const parts: string[] = [];
@@ -457,7 +464,13 @@ export function renderMinimalistFrame({
 		rightCorner: "╮",
 		renderBorder,
 	});
-	const bottomMetadata = renderBottomLeft(metadata, uiTheme, config, renderBorder, renderThinking);
+	const bottomMetadata = renderMinimalistModelThinking(
+		metadata,
+		uiTheme,
+		config,
+		renderBorder,
+		renderThinking,
+	);
 	const bottomViewport = viewportLabel("below", viewport?.below);
 	const bottom = renderLabeledBorder({
 		width,

@@ -25,7 +25,7 @@ interface ActiveAgentRun {
 interface AgentState {
 	name: string; def: AgentDef; goal: string; status: AgentStatus; pendingOutcome?: AgentCompletionStatus; task: string;
 	toolCount: number; elapsed: number; lastWork: string; activity: ActivityLog; contextTokens: number; contextWindow: number; tokens: TokenCounts;
-	sessionFile: string | null; runCount: number; autoName: boolean; origin: AgentOrigin; history: TaskHistoryEntry[]; sessionKey: string; timer?: ReturnType<typeof setInterval>; activeRun?: ActiveAgentRun;
+	sessionFile: string | null; runCount: number; autoName: boolean; origin: AgentOrigin; history: TaskHistoryEntry[]; sessionKey: string; timer?: ReturnType<typeof setInterval>; doneAt?: number; doneTimer?: ReturnType<typeof setTimeout>; activeRun?: ActiveAgentRun;
 }
 type SavedInstance = { name: string; type: string; goal: string; autoName?: boolean; origin?: AgentOrigin; sessionKey?: string };
 type SavedTeam = { instances: SavedInstance[]; root?: string };
@@ -46,6 +46,44 @@ const MAX_KEPT_SESSIONS = 20;
 const ACTIVITY_HISTORY = 400;
 const ACTIVITY_HISTORY_CHARS = ACTIVITY_HISTORY * 200;
 const VIEW_ACTIVITY_LINES = 24;
+export const DONE_VISIBLE_MS = 60_000;
+
+type DoneExpiryState = Pick<AgentState, "status" | "doneAt" | "doneTimer">;
+type DoneExpiryClock = {
+	now: () => number;
+	setTimeout: typeof setTimeout;
+	clearTimeout: typeof clearTimeout;
+};
+const doneExpiryClock: DoneExpiryClock = { now: Date.now, setTimeout, clearTimeout };
+
+export function clearDoneExpiry(
+	state: DoneExpiryState,
+	clock: Pick<DoneExpiryClock, "clearTimeout"> = doneExpiryClock,
+): void {
+	if (state.doneTimer) clock.clearTimeout(state.doneTimer);
+	state.doneTimer = undefined;
+	state.doneAt = undefined;
+}
+
+export function scheduleDoneExpiry(
+	state: DoneExpiryState,
+	update: () => void,
+	clock: DoneExpiryClock = doneExpiryClock,
+): void {
+	clearDoneExpiry(state, clock);
+	if (state.status !== "done") return;
+	const doneAt = clock.now();
+	state.doneAt = doneAt;
+	const timer = clock.setTimeout(() => {
+		if (state.status !== "done" || state.doneAt !== doneAt || state.doneTimer !== timer) return;
+		state.status = "idle";
+		state.doneAt = undefined;
+		state.doneTimer = undefined;
+		update();
+	}, DONE_VISIBLE_MS);
+	state.doneTimer = timer;
+	timer.unref?.();
+}
 
 const key = (name: string) => name.toLowerCase();
 const normalizeName = (name: string) => name.trim().toLowerCase().replace(/\s+/g, "-");
@@ -179,6 +217,7 @@ export default function (pi: ExtensionAPI) {
 		const entries = ctx.sessionManager.getEntries();
 		const snapshot = entries.filter((entry: any) => entry.type === "custom" && entry.customType === "agent-team-instances").pop();
 		const saved = snapshot?.data as SavedTeam | undefined;
+		for (const state of agentStates.values()) clearDoneExpiry(state);
 		agentStates.clear(); rootAgent = undefined;
 		if (snapshot) {
 			for (const item of saved?.instances ?? []) {
@@ -259,6 +298,7 @@ export default function (pi: ExtensionAPI) {
 		if (!current) throw new Error("Instance no longer exists");
 		state = current;
 		if (state.status === "running" || state.status === "waiting") throw new Error(`Wait for ${displayName(state.name)} to finish before promotion`);
+		clearDoneExpiry(state);
 		const modelName = effectiveModel(state, ctx); const slash = modelName.indexOf("/");
 		const model = slash > 0 ? ctx.modelRegistry.find(modelName.slice(0, slash), modelName.slice(slash + 1)) : undefined;
 		if (!model || (parentModel(ctx) !== modelName && !await pi.setModel(model))) throw new Error(`Unable to select ${modelName}`);
@@ -271,7 +311,7 @@ export default function (pi: ExtensionAPI) {
 		if (!rootAgent) throw new Error("No instance is promoted for this session");
 		if (rootAgent.status === "running") throw new Error(`Wait for ${displayName(rootAgent.name)} to finish before demoting`);
 		const previous = rootAgent;
-		rootAgent = undefined; rootModelRestored = true; clearInterval(previous.timer); previous.timer = undefined; previous.status = "idle";
+		rootAgent = undefined; rootModelRestored = true; clearInterval(previous.timer); previous.timer = undefined; clearDoneExpiry(previous); previous.status = "idle";
 		applyActiveTools(); persistTeam(); updateWidget(); syncStatus(ctx);
 		ctx.ui.notify(`${displayName(previous.name)} is no longer this session's root; it is a dispatchable instance again.`, "info");
 	}
@@ -297,6 +337,7 @@ export default function (pi: ExtensionAPI) {
 		try { rmSync(sessionPath(state), { force: true }); } catch {}
 	}
 	function clearAgent(state: AgentState) {
+		clearDoneExpiry(state);
 		discardSession(state);
 		state.sessionFile = null;
 		state.contextTokens = 0;
@@ -317,6 +358,7 @@ export default function (pi: ExtensionAPI) {
 		if (state.status === "running") throw new Error(`Cannot remove ${displayName(state.name)} while it is running`);
 		if (state.status === "waiting") throw new Error(`${displayName(state.name)} is still returning its result; wait for it to land`);
 		const wasViewed = viewedAgent === state; const fastKey = key(state.name);
+		clearDoneExpiry(state);
 		agentStates.delete(fastKey); agentModelOverrides.delete(fastKey); agentFastOverrides.delete(fastKey); discardSession(state);
 		pi.appendEntry("agent-team-model-overrides", { overrides: Object.fromEntries(agentModelOverrides) });
 		pi.appendEntry("agent-team-fast-overrides", { overrides: Object.fromEntries(agentFastOverrides) });
@@ -405,6 +447,7 @@ export default function (pi: ExtensionAPI) {
 		const output = run.output.toString();
 		state.lastWork = error?.message ?? run.text.lastLine;
 		state.activeRun = undefined;
+		if (state.status === "done") scheduleDoneExpiry(state, updateWidget);
 		updateWidget();
 		syncStatus();
 		if (queuedForDelivery) {
@@ -416,6 +459,7 @@ export default function (pi: ExtensionAPI) {
 		terminateRun(run);
 	}
 	function startAgent(state: AgentState, task: string, ctx: any, options: { record?: boolean; maintenance?: boolean } = {}): ActiveAgentRun {
+		clearDoneExpiry(state);
 		state.status = "running"; state.contextWindow = modelWindow(effectiveModel(state, ctx), ctx); state.toolCount = 0; state.elapsed = 0; state.lastWork = "";
 		// Maintenance runs (compaction) must not enter the transcript as a task the agent was given.
 		if (options.record === false) state.task = "Compacting";
@@ -1001,11 +1045,12 @@ export default function (pi: ExtensionAPI) {
 		const delivered = pendingDeliveries.shift();
 		if (delivered) {
 			restoreNextWaitingAgent([delivered]);
+			if (delivered.status === "done") scheduleDoneExpiry(delivered, updateWidget);
 			updateWidget();
 			syncStatus(ctx);
 		}
 		if (!rootAgent) return;
-		clearInterval(rootAgent.timer); rootAgent.status = "running"; rootAgent.toolCount = 0; rootAgent.elapsed = 0; rootStartTime = Date.now(); rootAgent.timer = setInterval(() => { if (rootAgent) { rootAgent.elapsed = Date.now() - rootStartTime; updateWidget(); } }, FRAME_MS); rootAgent.timer.unref?.(); rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); syncStatus(ctx); });
+		clearInterval(rootAgent.timer); clearDoneExpiry(rootAgent); rootAgent.status = "running"; rootAgent.toolCount = 0; rootAgent.elapsed = 0; rootStartTime = Date.now(); rootAgent.timer = setInterval(() => { if (rootAgent) { rootAgent.elapsed = Date.now() - rootStartTime; updateWidget(); } }, FRAME_MS); rootAgent.timer.unref?.(); rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); syncStatus(ctx); });
 	pi.on("message_start", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("message_update", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
 	pi.on("message_end", (_event, ctx) => { if (rootAgent) { rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens; updateWidget(); } });
@@ -1017,16 +1062,19 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.isIdle()) return;
 		hostBusy = false;
 		pendingDeliveries.length = 0;
-		restoreWaitingAgents([...agentStates.values()]);
+		const waiting = [...agentStates.values()].filter(state => state.status === "waiting");
+		restoreWaitingAgents(waiting);
+		for (const state of waiting) if (state.status === "done") scheduleDoneExpiry(state, updateWidget);
 		if (rootAgent) {
 			clearInterval(rootAgent.timer); rootAgent.elapsed = rootStartTime ? Date.now() - rootStartTime : rootAgent.elapsed;
 			rootAgent.status = "done"; rootAgent.contextTokens = ctx.getContextUsage()?.tokens ?? rootAgent.contextTokens;
+			scheduleDoneExpiry(rootAgent, updateWidget);
 		}
 		updateWidget();
 		syncStatus(ctx);
 		await drainRoutingQueue(ctx);
 	});
-	pi.on("session_shutdown", () => { lifecycleGeneration++; bulkCompactionActive = false; for (const state of agentStates.values()) { clearInterval(state.timer); state.timer = undefined; if (state.activeRun) terminateRun(state.activeRun); } });
+	pi.on("session_shutdown", () => { lifecycleGeneration++; bulkCompactionActive = false; for (const state of agentStates.values()) { clearInterval(state.timer); state.timer = undefined; clearDoneExpiry(state); if (state.activeRun) terminateRun(state.activeRun); } });
 	pi.on("session_start", async (_event, ctx) => {
 		lifecycleGeneration++; bulkCompactionActive = false;
 		if (!agentAutocompleteInstalled) {

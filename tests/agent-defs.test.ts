@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { parseAgentMarkdown, parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
 import { canClearAgent, canCompactAgent, canSteerAgent, formatAgentModelLabel, formatToolActivity, instanceSuffix, nextAgentName, parseOpenAIFastEnvValue, parseTellArguments, readChildSession, resolveAgentThinking, resultDeliveryStatus, runConcurrent, shouldCompleteTellTarget } from "../dotfiles/agents/.pi/agent/extensions/agent-team-helpers.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { CallLine, callTail, displayName, renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
+import { agentBorderColor, CallLine, callTail, displayName, renderCard, renderDetail, renderGrid } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-render.ts";
 import { ActivityLog } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-activity.ts";
 
 assert.deepEqual(parseTeams("flat:\n  - planner\n  - builder\nrooted:\n  main: understand\n  subs:\n    - iterate\n"), {
@@ -76,6 +76,29 @@ assert.equal(formatAgentModelLabel("openai-codex/gpt-5.6-sol", true), "gpt-5.6-s
 assert.equal(formatAgentModelLabel("anthropic/claude-4", true), "claude-4");
 
 const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+assert.deepEqual(
+	[
+		agentBorderColor("running"),
+		agentBorderColor("waiting"),
+		agentBorderColor("done"),
+		agentBorderColor("error"),
+		agentBorderColor("idle"),
+	],
+	["accent", "error", "bright-green", "dim", "dim"],
+);
+const borderTheme = {
+	fg: (color: string, text: string) => `\x1b[${{ accent: 36, error: 31, dim: 90 }[color] ?? 37}m${text}\x1b[0m`,
+	bold: (text: string) => text,
+};
+for (const [status, color] of [["running", 36], ["waiting", 31], ["done", 92], ["error", 90], ["idle", 90]] as const) {
+	const bordered = renderCard({ name: "agent", def: { name: "agent", description: "" }, goal: "", task: "", status, toolCount: 0, elapsed: 0, contextTokens: 0, contextWindow: 0, tokens: { input: 0, output: 0 }, model: "test/model" }, 30, borderTheme, 0);
+	assert.match(bordered[0], new RegExp(`^\\x1b\\[${color}m╭`));
+	assert.match(bordered[3], new RegExp(`^\\x1b\\[${color}m╰`));
+	for (const row of bordered.slice(1, 3)) {
+		assert.match(row, new RegExp(`^\\x1b\\[${color}m│`));
+		assert.match(row, new RegExp(`\\x1b\\[${color}m│\\x1b\\[0m$`));
+	}
+}
 // The cards render the display form too, not just the detail pane.
 const card = renderCard({ name: "tracer-b", def: { name: "tracer", description: "" }, goal: "", task: "", status: "idle", toolCount: 0, elapsed: 0, contextTokens: 0, contextWindow: 500_000, tokens: { input: 0, output: 0 }, model: "test/model" }, 40, plainTheme, 0).join(" ");
 assert.match(card.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, ""), /Tracer B/, "cards show the spaced, capitalised form");
