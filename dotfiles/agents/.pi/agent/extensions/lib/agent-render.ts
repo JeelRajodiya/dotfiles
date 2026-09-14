@@ -103,7 +103,15 @@ export function renderCard(agent: RenderableAgent, width: number, theme: Theme, 
 	const context = theme.fg(contextColor(agent), formatAgentContext(agent.contextTokens, agent.contextWindow));
 	const waiting = agent.status === "waiting" ? agent.pendingOutcome === "error" ? "return error" : "returning" : "";
 	const elapsed = agent.status === "running" || agent.elapsed ? formatActivityDuration(agent.elapsed) : "";
-	const telemetry = [agent.toolCount || "", waiting, elapsed].filter(Boolean).join(" · ");
+	const metadata = (text: string) =>
+		agent.status === "idle" ? theme.fg("dim", text) : text;
+	const telemetry = [
+		agent.toolCount ? metadata(String(agent.toolCount)) : "",
+		waiting,
+		elapsed ? metadata(elapsed) : "",
+	]
+		.filter(Boolean)
+		.join(" · ");
 	// On narrow cards, keep the waiting/elapsed state before a tool count that would crowd it out.
 	const vital = visibleWidth(telemetry) <= inner - 4 ? telemetry : waiting || elapsed || truncateToWidth(String(agent.toolCount), Math.max(1, inner - 4));
 	const identityLeft = `${name} ${context}`;

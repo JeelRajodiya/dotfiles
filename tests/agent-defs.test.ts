@@ -110,6 +110,9 @@ const elapsedAgent = {
 const elapsedCard = renderCard(elapsedAgent, 80, plainTheme);
 assert.equal(elapsedCard.length, 4);
 assert.match(elapsedCard[1], /7 · 12s/);
+const idleMetadataCard = renderCard({ ...elapsedAgent, status: "idle" }, 80, borderTheme);
+assert.match(idleMetadataCard[1], /\x1b\[90m7\x1b\[0m · \x1b\[90m12s\x1b\[0m/);
+assert.match(idleMetadataCard[1], /\x1b\[36mIterate\x1b\[0m/, "idle metadata does not dim the agent name");
 const longRunCard = renderCard({ ...elapsedAgent, elapsed: 210_000 }, 80, plainTheme);
 assert.match(longRunCard[1], /3m30s/, "a run past a minute reads in minutes, not 210s");
 
