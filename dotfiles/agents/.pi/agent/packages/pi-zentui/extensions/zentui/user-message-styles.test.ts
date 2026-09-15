@@ -1,4 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { defaultConfig } from "./config";
 import { renderUserMessageStyle } from "./user-message-styles";
@@ -13,7 +14,7 @@ const theme = {
 } as unknown as Theme;
 
 describe("user message rails", () => {
-	it("uses the border style for every framed edge without changing compact accent rails", () => {
+	it("hides only the framed rail while preserving indentation, rules, and compact rails", () => {
 		const config = structuredClone(defaultConfig);
 		config.components.userMessages.colorSource = "theme";
 		config.colors.editorBorder = "bold error";
@@ -28,8 +29,11 @@ describe("user message rails", () => {
 			config,
 		});
 		expect(framed[0]).toContain("\x1b[31m\x1b[1m────────────");
-		expect(framed[1].startsWith("\x1b[31m\x1b[1m│")).toBe(true);
+		expect(framed[1].startsWith("  ")).toBe(true);
+		expect(framed[2].startsWith("  ")).toBe(true);
+		expect(framed.slice(1, -1).join("")).not.toContain("│");
 		expect(framed.at(-1)).toContain("\x1b[31m\x1b[1m────────────");
+		expect(framed.every((line) => visibleWidth(line) === 12)).toBe(true);
 
 		config.components.userMessages.style = "compact";
 		expect(

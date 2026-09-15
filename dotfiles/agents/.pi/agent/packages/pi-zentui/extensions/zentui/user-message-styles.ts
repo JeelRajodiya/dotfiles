@@ -90,7 +90,7 @@ function renderRail(theme: Theme | undefined, config: ZentuiConfig): string {
 
 function renderFramed({ text, width, theme, config }: UserMessageStyleRenderInput): string[] {
 	if (width <= 0) return [""];
-	const rail = `${border(theme, config, config.icons.rail)} `;
+	const rail = " ".repeat(visibleWidth(config.icons.rail) + 1);
 	const contentWidth = Math.max(1, width - visibleWidth(rail));
 	const body = renderMarkdown(text, contentWidth, theme);
 	const row = (line: string) => {
