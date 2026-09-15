@@ -417,7 +417,7 @@ function parseEditorBorder(
 	if (/^─+$/.test(plain)) return {};
 
 	const arrow = direction === "above" ? "↑" : "↓";
-	const match = new RegExp(`^─── ${arrow} ([1-9]\\d*) more ─*$`).exec(plain);
+	const match = new RegExp(`^─* ${arrow} ([1-9]\\d*) more ─*$`).exec(plain);
 	return match?.[1] ? { count: match[1] } : undefined;
 }
 
