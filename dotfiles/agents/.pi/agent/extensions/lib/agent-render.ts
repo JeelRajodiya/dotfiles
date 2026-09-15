@@ -4,7 +4,6 @@
  */
 import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { formatAgentModelLabel, formatAgentContext, formatAgentTokens, type TokenCounts } from "../agent-team-helpers.ts";
-import { renderStyleForSource } from "../../packages/pi-zentui/extensions/zentui/style.ts";
 import { activityStartedAt, cleanActivity, formatActivityDuration, isActivityRunning, thoughtActivityLabel, type ActivityEntry } from "./agent-activity.ts";
 
 export type AgentStatus = "idle" | "running" | "waiting" | "done" | "error";
@@ -47,14 +46,7 @@ export const spinnerFrame = (now = Date.now()) => SPINNER[Math.floor(now / FRAME
 const statusColor = (status: AgentStatus) => STATUS_COLOR[status] ?? "dim";
 const statusGlyph = (status: AgentStatus, now?: number) =>
 	status === "running" ? spinnerFrame(now) : STATUS_ICON[status] ?? "○";
-export const agentBorderColor = (status: AgentStatus) =>
-	status === "running"
-		? "accent"
-		: status === "waiting"
-			? "error"
-			: status === "done"
-				? "bright-green"
-				: "dim";
+export const agentBorderColor = (status: AgentStatus) => statusColor(status);
 
 /**
  * Colour the context figure by how full the window is, so it reads at a glance without a meter.
@@ -90,11 +82,9 @@ export function renderCard(agent: RenderableAgent, width: number, theme: Theme, 
 	const inner = cardWidth - 4;
 	const borderColor = agentBorderColor(agent.status);
 	const border = (text: string) =>
-		borderColor === "bright-green"
-			? renderStyleForSource(theme, "terminal", borderColor, text)
-			: agent.status === "running"
-				? theme.bold(theme.fg("accent", text))
-				: theme.fg(borderColor, text);
+		agent.status === "running"
+			? theme.bold(theme.fg(borderColor, text))
+			: theme.fg(borderColor, text);
 	const rule = (left: string, right: string) => border(left + "─".repeat(cardWidth - 2) + right);
 	const row = (content: string) => border("│") + " " + truncateToWidth(content, inner) + " ".repeat(Math.max(0, inner - visibleWidth(content))) + " " + border("│");
 

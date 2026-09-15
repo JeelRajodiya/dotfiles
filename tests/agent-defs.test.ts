@@ -84,14 +84,15 @@ assert.deepEqual(
 		agentBorderColor("error"),
 		agentBorderColor("idle"),
 	],
-	["accent", "error", "bright-green", "dim", "dim"],
+	["accent", "warning", "success", "error", "dim"],
 );
 const borderTheme = {
-	fg: (color: string, text: string) => `\x1b[${{ accent: 36, error: 31, dim: 90 }[color] ?? 37}m${text}\x1b[0m`,
+	fg: (color: string, text: string) => `\x1b[${{ accent: 36, warning: 33, success: 32, error: 31, dim: 90 }[color] ?? 37}m${text}\x1b[0m`,
 	bold: (text: string) => text,
 };
-for (const [status, color] of [["running", 36], ["waiting", 31], ["done", 92], ["error", 90], ["idle", 90]] as const) {
+for (const [status, color, glyph] of [["running", 36, "⠋"], ["waiting", 33, "↗"], ["done", 32, "✓"], ["error", 31, "✗"], ["idle", 90, "○"]] as const) {
 	const bordered = renderCard({ name: "agent", def: { name: "agent", description: "" }, goal: "", task: "", status, toolCount: 0, elapsed: 0, contextTokens: 0, contextWindow: 0, tokens: { input: 0, output: 0 }, model: "test/model" }, 30, borderTheme, 0);
+	assert.match(bordered[1], new RegExp(`\\x1b\\[${color}m${glyph}`));
 	assert.match(bordered[0], new RegExp(`^\\x1b\\[${color}m╭`));
 	assert.match(bordered[3], new RegExp(`^\\x1b\\[${color}m╰`));
 	for (const row of bordered.slice(1, 3)) {
