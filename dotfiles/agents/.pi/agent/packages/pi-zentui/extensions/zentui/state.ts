@@ -77,6 +77,7 @@ export function syncState(
 	const seenSubagentUsage = new Set<string>();
 	let subagentCost = 0;
 	let fastEnabled = false;
+	let sessionFast: boolean | undefined;
 	for (const entry of entries) {
 		if (entry.type !== "custom") continue;
 		if (entry.customType === "agent-team-usage") {
@@ -87,12 +88,15 @@ export function syncState(
 			if (typeof cost === "number" && Number.isFinite(cost)) subagentCost += cost;
 		} else if (entry.customType === "openai-fast") {
 			fastEnabled = (entry.data as { enabled?: boolean } | undefined)?.enabled === true;
+		} else if (entry.customType === "openai-fast-session") {
+			const enabled = (entry.data as { enabled?: unknown } | undefined)?.enabled;
+			sessionFast = typeof enabled === "boolean" ? enabled : undefined;
 		}
 	}
 	const m = ctx.model;
 	state.modelId = m?.id ?? "";
 	state.modelName = m?.name ?? "";
-	state.fast = (m?.provider === "openai" || m?.provider === "openai-codex") && fastEnabled;
+	state.fast = (m?.provider === "openai" || m?.provider === "openai-codex") && (sessionFast ?? fastEnabled);
 	// Retained as a compatibility snapshot only; production surfaces format from raw fields.
 	state.modelLabel = modelLabelFor(state, "id");
 	state.providerLabel = formatProviderLabel(ctx.model?.provider);

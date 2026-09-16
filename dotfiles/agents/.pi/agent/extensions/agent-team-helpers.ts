@@ -164,6 +164,7 @@ export function interruptAgentRun(state: InterruptibleAgentState, run: Interrupt
 }
 
 export const OPENAI_FAST_ENV = "PI_AGENT_OPENAI_FAST";
+export const OPENAI_FAST_SESSION_EVENT = "openai-fast:set-session";
 
 /**
  * Parse the child-only OpenAI fast override variable. Only accepts `on`/`off`.

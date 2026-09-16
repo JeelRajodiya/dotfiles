@@ -6,6 +6,44 @@ default:
     - tracer
     - worker
     - reviewer
+  variants:
+    sol-fast:
+      all:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
+        fast: true
+      worker:
+        thinking: low
+    sol:
+      all:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
+        fast: false
+      worker:
+        thinking: low
+    sol-terra-fast:
+      all:
+        model: openai-codex/gpt-5.6-terra
+        thinking: medium
+        fast: true
+      orchestrator:
+        model: openai-codex/gpt-5.6-sol
+    sol-terra:
+      all:
+        model: openai-codex/gpt-5.6-terra
+        thinking: medium
+        fast: false
+      orchestrator:
+        model: openai-codex/gpt-5.6-sol
+    sol-luna:
+      all:
+        model: openai-codex/gpt-5.6-luna
+        thinking: medium
+        fast: false
+      orchestrator:
+        model: openai-codex/gpt-5.6-sol
+      worker:
+        thinking: low
 
 plan-build:
   - planner

@@ -13,9 +13,22 @@ assert.deepEqual(parseTeams("flat:\n  - planner\n  - builder\nrooted:\n  main: u
 	flat: { members: ["planner", "builder"] },
 	rooted: { root: "understand", members: ["iterate"] },
 });
-assert.deepEqual(parseTeams(readFileSync("dotfiles/agents/.pi/agent/agents/teams.yaml", "utf8"))["tracer-worker"], {
+const configuredTeams = parseTeams(readFileSync("dotfiles/agents/.pi/agent/agents/teams.yaml", "utf8"));
+assert.deepEqual(configuredTeams["tracer-worker"], {
 	root: "tracer", members: ["worker"],
 });
+assert.deepEqual(configuredTeams.default.variants?.["sol-terra-fast"], {
+	all: { model: "openai-codex/gpt-5.6-terra", thinking: "medium", fast: true },
+	orchestrator: { model: "openai-codex/gpt-5.6-sol" },
+});
+assert.deepEqual(parseTeams("legacy:\n  main: root\n  subs:\n    - worker\n"), {
+	legacy: { root: "root", members: ["worker"] },
+});
+for (const [source, pattern] of [
+	["team:\n  variants:\n    bad:\n      all:\n        thinking: turbo\n", /team \"team\", variant \"bad\", agent \"all\"/],
+	["team:\n  variants:\n    bad:\n      worker:\n        fast: maybe\n", /Invalid fast boolean/],
+	["team:\n  variants:\n    bad:\n      worker:\n        temperature: 1\n", /Unknown variant field \"temperature\"/],
+] as const) assert.throws(() => parseTeams(source), pattern);
 const agent = (thinking?: string) => parseAgentMarkdown(`---\nname: specialist${thinking === undefined ? "" : `\nthinking: ${thinking}`}\n---\nprompt`, "specialist.md")!;
 assert.equal(agent("low").thinking, "low");
 assert.equal(agent("medium").thinking, "medium");

@@ -3,6 +3,12 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 
+export interface AgentVariantSetting {
+	model?: string;
+	thinking?: ThinkingLevel;
+	fast?: boolean;
+}
+
 export interface AgentDef {
 	name: string;
 	description: string;
@@ -93,27 +99,75 @@ export interface TeamDef {
 	root?: string;
 	autoSpawn?: boolean;
 	autoSpawnLimit?: number;
+	variants?: Record<string, Record<string, AgentVariantSetting>>;
 }
 
-/** Minimal reader for flat `team:\n  - member` and rooted `team:\n  main: root\n  subs:\n    - member` shapes. */
+/** Minimal reader for flat/root teams plus the deliberately narrow team-local variant schema. */
 export function parseTeams(text: string): Record<string, TeamDef> {
 	const teams: Record<string, TeamDef> = {};
-	let current: string | undefined;
-	for (const line of text.split("\n")) {
-		const heading = line.match(/^(\S[^:]*):\s*$/);
-		if (heading) {
-			current = heading[1].trim();
-			teams[current] = { members: [] };
+	let currentTeam: string | undefined;
+	let section: "subs" | "variants" | undefined;
+	let currentVariant: string | undefined;
+	let currentAgent: string | undefined;
+	for (const [index, rawLine] of text.split("\n").entries()) {
+		if (!rawLine.trim() || rawLine.trimStart().startsWith("#")) continue;
+		const indent = rawLine.length - rawLine.trimStart().length;
+		const line = rawLine.trim();
+		const teamHeading = indent === 0 && line.match(/^([^:]+):$/);
+		if (teamHeading) {
+			currentTeam = teamHeading[1].trim();
+			teams[currentTeam] = { members: [] };
+			section = undefined; currentVariant = undefined; currentAgent = undefined;
 			continue;
 		}
-		const root = current && line.match(/^\s+main:\s*(.+?)\s*$/)?.[1]?.trim();
-		if (root && current) teams[current].root = root;
-		const autoSpawn = current && line.match(/^\s+auto-spawn:\s*(true|false)\s*$/i)?.[1]?.toLowerCase();
-		if (autoSpawn && current) teams[current].autoSpawn = autoSpawn === "true";
-		const autoSpawnLimit = current && line.match(/^\s+auto-spawn-limit:\s*(\d+)\s*$/)?.[1];
-		if (autoSpawnLimit && current) teams[current].autoSpawnLimit = Number(autoSpawnLimit);
-		const member = current && line.match(/^\s+-\s+(.+)$/)?.[1]?.trim();
-		if (member && current) teams[current].members.push(member);
+		if (!currentTeam) throw new Error(`Invalid teams.yaml line ${index + 1}: expected team name`);
+		const team = teams[currentTeam];
+		if (indent === 2 && line === "subs:") { section = "subs"; currentVariant = undefined; currentAgent = undefined; continue; }
+		if (indent === 2 && line === "variants:") { section = "variants"; team.variants ??= {}; currentVariant = undefined; currentAgent = undefined; continue; }
+		if (indent === 2 && line.startsWith("- ")) { team.members.push(line.slice(2).trim()); section = undefined; continue; }
+		if (indent === 2) {
+			const field = line.match(/^([^:]+):\s*(.*?)$/);
+			if (!field) continue;
+			const [, name, value] = field;
+			if (name === "main" && value) team.root = value;
+			else if (name === "auto-spawn" && /^(true|false)$/i.test(value)) team.autoSpawn = value.toLowerCase() === "true";
+			else if (name === "auto-spawn-limit" && /^\d+$/.test(value)) team.autoSpawnLimit = Number(value);
+			section = undefined;
+			continue;
+		}
+		if (section === "subs" && indent === 4 && line.startsWith("- ")) { team.members.push(line.slice(2).trim()); continue; }
+		if (section !== "variants") continue;
+		const context = () => `team "${currentTeam}"${currentVariant ? `, variant "${currentVariant}"` : ""}${currentAgent ? `, agent "${currentAgent}"` : ""}`;
+		if (indent === 4 && line.endsWith(":")) {
+			currentVariant = line.slice(0, -1).trim(); currentAgent = undefined;
+			if (!currentVariant) throw new Error(`Invalid variant name in ${context()}`);
+			team.variants![currentVariant] = {};
+			continue;
+		}
+		if (indent === 6 && line.endsWith(":")) {
+			if (!currentVariant) throw new Error(`Variant agent without variant in team "${currentTeam}"`);
+			currentAgent = line.slice(0, -1).trim();
+			if (!currentAgent) throw new Error(`Invalid agent name in ${context()}`);
+			team.variants![currentVariant]![currentAgent] = {};
+			continue;
+		}
+		if (indent === 8) {
+			if (!currentVariant || !currentAgent) throw new Error(`Variant setting without agent in ${context()}`);
+			const field = line.match(/^([^:]+):\s*(.*?)$/);
+			if (!field) throw new Error(`Invalid variant setting in ${context()}`);
+			const [, name, value] = field;
+			const setting = team.variants![currentVariant]![currentAgent]!;
+			if (name === "model" && value) setting.model = value;
+			else if (name === "thinking") {
+				if (!THINKING_LEVELS.includes(value as ThinkingLevel)) throw new Error(`Invalid thinking "${value}" in ${context()}`);
+				setting.thinking = value as ThinkingLevel;
+			} else if (name === "fast") {
+				if (!/^(true|false)$/i.test(value)) throw new Error(`Invalid fast boolean "${value}" in ${context()}`);
+				setting.fast = value.toLowerCase() === "true";
+			} else throw new Error(`Unknown variant field "${name}" in ${context()}`);
+			continue;
+		}
+		throw new Error(`Invalid variant nesting in ${context()} at line ${index + 1}`);
 	}
 	return teams;
 }

@@ -1,6 +1,7 @@
 // Run: node tests/agent-team-config.test.ts
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { parseTeams } from "../dotfiles/agents/.pi/agent/extensions/lib/agent-defs.ts";
 
 const root = new URL("../dotfiles/agents/.pi/agent/", import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, root), "utf8");
@@ -11,7 +12,7 @@ const frontmatter = (path: string) => Object.fromEntries(
 const team = read("agents/teams.yaml");
 const orchestrator = read("agents/orchestrator.md");
 const agentTeam = read("extensions/agent-team.ts");
-assert.match(team, /^default:\n  main: orchestrator\n  auto-spawn: true\n  auto-spawn-limit: 3\n  subs:\n    - tracer\n    - worker\n    - reviewer$/m);
+assert.match(team, /^default:\n  main: orchestrator\n  auto-spawn: true\n  auto-spawn-limit: 3\n  subs:\n    - tracer\n    - worker\n    - reviewer\n  variants:/m);
 assert.match(read("settings.json"), /"npm:@juicesharp\/rpiv-ask-user-question"/);
 assert.deepEqual(frontmatter("agents/orchestrator.md"), {
 	name: "orchestrator",
@@ -33,6 +34,28 @@ const reviewer = frontmatter("agents/reviewer.md");
 assert.deepEqual({ model: reviewer.model, thinking: reviewer.thinking, fast: reviewer.fast }, {
 	model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast: "false",
 }, "Reviewer pins its own depth instead of inheriting whatever the host is set to");
+const variants = parseTeams(team).default.variants!;
+const base = { orchestrator: frontmatter("agents/orchestrator.md"), worker, tracer, reviewer };
+const outcome = (variant: string, agent: keyof typeof base) => ({
+	model: variants[variant][agent]?.model ?? variants[variant].all?.model ?? base[agent].model,
+	thinking: variants[variant][agent]?.thinking ?? variants[variant].all?.thinking ?? base[agent].thinking,
+	fast: variants[variant][agent]?.fast ?? variants[variant].all?.fast ?? base[agent].fast === "true",
+});
+const profile = (model: string, fast: boolean, workerThinking: "low" | "medium" = "medium") => ({
+	orchestrator: { model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast },
+	worker: { model, thinking: workerThinking, fast },
+	tracer: { model, thinking: "medium", fast },
+	reviewer: { model, thinking: "medium", fast },
+});
+for (const [name, expected] of Object.entries({
+	"sol-fast": profile("openai-codex/gpt-5.6-sol", true, "low"),
+	sol: profile("openai-codex/gpt-5.6-sol", false, "low"),
+	"sol-terra-fast": profile("openai-codex/gpt-5.6-terra", true),
+	"sol-terra": profile("openai-codex/gpt-5.6-terra", false),
+	"sol-luna": profile("openai-codex/gpt-5.6-luna", false, "low"),
+})) {
+	for (const agent of Object.keys(base) as (keyof typeof base)[]) assert.deepEqual(outcome(name, agent), expected[agent], `${name}/${agent}`);
+}
 const reviewerPrompt = read("agents/reviewer.md");
 for (const level of ["P0", "P1", "P2"]) assert.match(reviewerPrompt, new RegExp(`\\[${level}\\]`), `Reviewer defines ${level}`);
 // Delegation is decided by how long the orchestrator stays unavailable, not by task category.
@@ -56,7 +79,7 @@ assert.match(agentTeam, /agent-team-routing/);
 assert.equal(agentTeam.match(/=== "worker" && !approved/g)?.length, 3, "dispatch, route and spawn are all gated");
 // An idle instance has no activeRun to read its level from; it must fall back to its own
 // definition, not to whatever the host happens to be set to.
-assert.match(agentTeam, /state\.activeRun\?\.thinking \?\? resolveAgentThinking\(state\.def\.thinking, widgetCtx\.thinkingLevel\)/);
+assert.match(agentTeam, /state\.activeRun\?\.thinking \?\? effectiveThinking\(state, widgetCtx\)/);
 assert.match(agentTeam, /relation=related steers only the named running instance/);
 assert.match(orchestrator, /answer with peek_agent: it reads that instance's activity log without prompting it\./);
 assert.match(orchestrator, /Never dispatch or steer a running agent just to request a status update\./);
