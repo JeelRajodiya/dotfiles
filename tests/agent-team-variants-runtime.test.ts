@@ -55,11 +55,11 @@ try {
 	await handlers.get("session_start")!({}, ctx);
 	const run = (args: string) => commands.get("agents").handler(args, ctx);
 
-	await run("variant sol-terra-fast");
+	await run("variant balanced-fast");
 	assert.equal(modelChanges.length, 0, "the orchestrator override keeps the root on sol");
 	assert.equal(thinkingChanges.at(-1), "medium");
-	assert.deepEqual(fastEvents.at(-1), { enabled: true });
-	assert.equal(entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data.variant, "sol-terra-fast");
+	assert.deepEqual(fastEvents.at(-1), { enabled: false }, "the root stays standard while children use balanced-fast");
+	assert.equal(entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data.variant, "balanced-fast");
 	await run("model worker");
 	assert.match(selections.at(-1)!, /gpt-5\.6-terra \(variant\)/, "child settings use the active variant");
 
@@ -69,7 +69,7 @@ try {
 	assert.equal(entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data.variant, undefined);
 
 	await run("variant missing");
-	assert.match(notifications.at(-1)!, /Unknown variant.*sol-fast.*sol-luna/);
+	assert.match(notifications.at(-1)!, /Unknown variant.*quality.*turbo\+/);
 } finally {
 	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

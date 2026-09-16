@@ -7,43 +7,102 @@ default:
     - worker
     - reviewer
   variants:
-    sol-fast:
-      all:
-        model: openai-codex/gpt-5.6-sol
-        thinking: medium
-        fast: true
-      worker:
-        thinking: low
-    sol:
+    quality:
       all:
         model: openai-codex/gpt-5.6-sol
         thinking: medium
         fast: false
       worker:
         thinking: low
-    sol-terra-fast:
+    quality-fast:
       all:
-        model: openai-codex/gpt-5.6-terra
+        model: openai-codex/gpt-5.6-sol
         thinking: medium
         fast: true
       orchestrator:
-        model: openai-codex/gpt-5.6-sol
-    sol-terra:
+        fast: false
+      worker:
+        thinking: low
+    balanced:
       all:
         model: openai-codex/gpt-5.6-terra
         thinking: medium
         fast: false
       orchestrator:
         model: openai-codex/gpt-5.6-sol
-    sol-luna:
+      reviewer:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
+        fast: false
+    balanced-fast:
+      all:
+        model: openai-codex/gpt-5.6-terra
+        thinking: medium
+        fast: true
+      orchestrator:
+        model: openai-codex/gpt-5.6-sol
+        fast: false
+      reviewer:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
+        fast: true
+    economy:
       all:
         model: openai-codex/gpt-5.6-luna
         thinking: medium
         fast: false
       orchestrator:
         model: openai-codex/gpt-5.6-sol
+    economy-fast:
+      all:
+        model: openai-codex/gpt-5.6-luna
+        thinking: medium
+        fast: true
+      orchestrator:
+        model: openai-codex/gpt-5.6-sol
+        fast: false
+    sprint:
+      all:
+        model: openai-codex/gpt-5.6-terra
+        thinking: medium
+        fast: true
+      orchestrator:
+        model: openai-codex/gpt-5.6-sol
+        fast: false
       worker:
-        thinking: low
+        model: openai-codex/gpt-5.3-codex-spark
+        thinking: medium
+        fast: false
+      reviewer:
+        model: openai-codex/gpt-5.3-codex-spark
+        thinking: medium
+        fast: false
+    turbo:
+      all:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
+        fast: true
+      orchestrator:
+        fast: false
+      worker:
+        model: openai-codex/gpt-5.3-codex-spark
+        thinking: medium
+        fast: false
+    turbo+:
+      all:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
+        fast: true
+      orchestrator:
+        fast: false
+      tracer:
+        model: openai-codex/gpt-5.3-codex-spark
+        thinking: medium
+        fast: false
+      worker:
+        model: openai-codex/gpt-5.3-codex-spark
+        thinking: medium
+        fast: false
 
 plan-build:
   - planner

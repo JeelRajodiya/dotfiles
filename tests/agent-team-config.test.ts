@@ -41,20 +41,48 @@ const outcome = (variant: string, agent: keyof typeof base) => ({
 	thinking: variants[variant][agent]?.thinking ?? variants[variant].all?.thinking ?? base[agent].thinking,
 	fast: variants[variant][agent]?.fast ?? variants[variant].all?.fast ?? base[agent].fast === "true",
 });
-const profile = (model: string, fast: boolean, workerThinking: "low" | "medium" = "medium") => ({
-	orchestrator: { model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast },
-	worker: { model, thinking: workerThinking, fast },
+const sol = "openai-codex/gpt-5.6-sol";
+const terra = "openai-codex/gpt-5.6-terra";
+const luna = "openai-codex/gpt-5.6-luna";
+const spark = "openai-codex/gpt-5.3-codex-spark";
+const same = (model: string, fast: boolean) => ({
+	orchestrator: { model, thinking: "medium", fast },
+	worker: { model, thinking: "medium", fast },
 	tracer: { model, thinking: "medium", fast },
 	reviewer: { model, thinking: "medium", fast },
 });
-for (const [name, expected] of Object.entries({
-	"sol-fast": profile("openai-codex/gpt-5.6-sol", true, "low"),
-	sol: profile("openai-codex/gpt-5.6-sol", false, "low"),
-	"sol-terra-fast": profile("openai-codex/gpt-5.6-terra", true),
-	"sol-terra": profile("openai-codex/gpt-5.6-terra", false),
-	"sol-luna": profile("openai-codex/gpt-5.6-luna", false, "low"),
-})) {
-	for (const agent of Object.keys(base) as (keyof typeof base)[]) assert.deepEqual(outcome(name, agent), expected[agent], `${name}/${agent}`);
+const profiles = {
+	quality: { ...same(sol, false), worker: { model: sol, thinking: "low", fast: false } },
+	"quality-fast": { ...same(sol, true), orchestrator: { model: sol, thinking: "medium", fast: false }, worker: { model: sol, thinking: "low", fast: true } },
+	balanced: {
+		...same(terra, false), orchestrator: { model: sol, thinking: "medium", fast: false },
+		reviewer: { model: sol, thinking: "medium", fast: false },
+	},
+	"balanced-fast": {
+		...same(terra, true), orchestrator: { model: sol, thinking: "medium", fast: false },
+		reviewer: { model: sol, thinking: "medium", fast: true },
+	},
+	economy: { ...same(luna, false), orchestrator: { model: sol, thinking: "medium", fast: false } },
+	"economy-fast": { ...same(luna, true), orchestrator: { model: sol, thinking: "medium", fast: false } },
+	sprint: {
+		...same(terra, true), orchestrator: { model: sol, thinking: "medium", fast: false },
+		worker: { model: spark, thinking: "medium", fast: false }, reviewer: { model: spark, thinking: "medium", fast: false },
+	},
+	turbo: { ...same(sol, true), orchestrator: { model: sol, thinking: "medium", fast: false }, worker: { model: spark, thinking: "medium", fast: false } },
+	"turbo+": {
+		...same(sol, true), orchestrator: { model: sol, thinking: "medium", fast: false },
+		tracer: { model: spark, thinking: "medium", fast: false }, worker: { model: spark, thinking: "medium", fast: false },
+	},
+};
+assert.deepEqual(Object.keys(variants), Object.keys(profiles), "catalog has exactly the nine purpose-named profiles");
+for (const [name, expected] of Object.entries(profiles)) {
+	for (const agent of Object.keys(base) as (keyof typeof base)[]) {
+		const actual = outcome(name, agent);
+		assert.deepEqual(actual, expected[agent], `${name}/${agent}`);
+		if (agent === "orchestrator") assert.equal(actual.fast, false, `${name}/orchestrator never enables fast`);
+		if (actual.model === luna || actual.model === spark) assert.equal(actual.thinking, "medium", `${name}/${agent} stays medium`);
+		if (actual.model === spark) assert.equal(actual.fast, false, `${name}/${agent} Spark never enables fast`);
+	}
 }
 const reviewerPrompt = read("agents/reviewer.md");
 for (const level of ["P0", "P1", "P2"]) assert.match(reviewerPrompt, new RegExp(`\\[${level}\\]`), `Reviewer defines ${level}`);
