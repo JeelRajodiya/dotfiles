@@ -6,8 +6,15 @@ OS="$(uname)"
 echo "Starting installation on $OS..."
 
 if [ "$OS" = "Linux" ]; then
+    # Refresh GitHub CLI signing key if configured so apt-get update gets the latest release
+    if [ -f /etc/apt/sources.list.d/github-cli.list ]; then
+        sudo mkdir -p -m 755 /etc/apt/keyrings
+        wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+        sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+    fi
+
     sudo apt-get install -y software-properties-common
-    sudo add-apt-repository ppa:zhangsongcui3371/fastfetch
+    sudo add-apt-repository -y ppa:zhangsongcui3371/fastfetch
     sudo apt-get update
     sudo apt-get full-upgrade -y
     sudo apt-get install -y \
@@ -25,7 +32,6 @@ if [ "$OS" = "Linux" ]; then
         file \
         fzf \
         git \
-        glow \
         gnome-calculator \
         golang \
         imagemagick \
@@ -45,6 +51,9 @@ if [ "$OS" = "Linux" ]; then
 
     [ -f /usr/bin/batcat ] && sudo ln -sf /usr/bin/batcat /usr/local/bin/bat
     [ -f /usr/bin/fdfind ] && sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd
+
+    # glow is not in Ubuntu 24.04 apt repos — install via snap
+    command -v glow >/dev/null || sudo snap install glow
 
     # Install Starship prompt.
     curl -sS https://starship.rs/install.sh | sh
