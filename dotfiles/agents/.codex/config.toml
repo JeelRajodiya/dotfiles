@@ -1,4 +1,4 @@
-service_tier = "fast"
+service_tier = "default"
 model = "gpt-5.6-sol"
 model_context_window = 600000
 model_auto_compact_token_limit = 500000
@@ -70,6 +70,9 @@ trust_level = "trusted"
 [projects."/Users/zeelrajodiya/Library/CloudStorage/OneDrive-Personal/OneDrive Documents/notes/work"]
 trust_level = "trusted"
 
+[projects."/Users/zeelrajodiya/Documents/Codex/2026-09-15/create-an-image-of"]
+trust_level = "trusted"
+
 [tui]
 status_line = [
     "model-with-reasoning",
@@ -91,23 +94,26 @@ theme = "ansi"
 url = "https://developers.openai.com/mcp"
 
 [mcp_servers.node_repl]
+args = []
 command = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
-startup_timeout_sec = 120.0
+startup_timeout_sec = 120
 
 [mcp_servers.node_repl.env]
-BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"
-BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"
-BROWSER_USE_CODEX_APP_VERSION = "26.803.41515"
-CODEX_CLI_PATH = "/Applications/ChatGPT.app/Contents/Resources/codex"
-CODEX_HOME = "/Users/zeelrajodiya/.codex"
-NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER = "Control the in-app browser in conjunction with the Browser Plugin."
-NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME = "Control the Chrome browser in conjunction with the Chrome Plugin. Prefer this method of controlling Chrome over alternatives (such as Computer Use) unless the user explicitly mentions an alternative."
-NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE = "Control desktop apps on macOS through Computer Use."
 NODE_REPL_NATIVE_PIPE_CONNECT_TIMEOUT_MS = "1000"
 NODE_REPL_NODE_MODULE_DIRS = "/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules"
 NODE_REPL_NODE_PATH = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node"
-NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "323bc3e687e17d7e377238d9f4c69111c4d0e6219103b6316d8c52082489533b"
 NODE_REPL_TRUSTED_CODE_PATHS = "/Users/zeelrajodiya/.codex:/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules"
+CODEX_HOME = "/Users/zeelrajodiya/.codex"
+BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"
+BROWSER_USE_TINYSKY_ENABLED = "1"
+NODE_REPL_INSTRUCTIONS_USE_CASE_BROWSER = ""
+NODE_REPL_INSTRUCTIONS_USE_CASE_CHROME = ""
+NODE_REPL_INSTRUCTIONS_USE_CASE_COMPUTER_USE = ""
+BROWSER_USE_CODEX_APP_BUILD_FLAVOR = "prod"
+BROWSER_USE_CODEX_APP_VERSION = "26.908.70816"
+NODE_REPL_TRUSTED_SERVICES = '{"browser":"/Users/zeelrajodiya/.codex/plugins/cache/openai-bundled/browser/26.908.70816/scripts/browser-service.mjs","sky":"@oai/sky/service"}'
+SKY_CUA_SERVICE_PATH = "/Users/zeelrajodiya/.codex/computer-use/Codex Computer Use.app"
+CODEX_CLI_PATH = "/Applications/ChatGPT.app/Contents/Resources/codex"
 
 [mcp_servers.computer-use]
 command = "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
@@ -121,13 +127,12 @@ memories = true
 js_repl = false
 
 [marketplaces.openai-bundled]
-last_updated = "2026-08-19T07:27:40Z"
 source_type = "local"
 source = "/Users/zeelrajodiya/.codex/.tmp/bundled-marketplaces/openai-bundled"
 
 [marketplaces.claude-plugins-official]
-last_updated = "2026-08-30T08:39:54Z"
-last_revision = "ed404106fcd80ba98ecb7c851e531dcb626d13b7"
+last_updated = "2026-09-18T09:04:25Z"
+last_revision = "1aa8f02ec8327f513686934f458a620f83db91ed"
 source_type = "git"
 source = "https://github.com/anthropics/claude-plugins-official.git"
 
@@ -175,17 +180,24 @@ enabled = true
 [plugins."atlassian-rovo@openai-curated-remote"]
 enabled = false
 
+[plugins."codex-app-tools@openai-bundled"]
+enabled = true
+
+[plugins."unified-computer-use@openai-bundled"]
+enabled = true
+
+[plugins."computer-use@openai-bundled"]
+enabled = true
+
 [shell_environment_policy]
 inherit = "core"
 
 [shell_environment_policy.set]
 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"
-BROWSER_USE_AVAILABLE_BACKENDS = "chrome,iab"
 NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S = "323bc3e687e17d7e377238d9f4c69111c4d0e6219103b6316d8c52082489533b"
-NODE_REPL_TRUSTED_CODE_PATHS = "/Users/zeelrajodiya/.codex:/Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules"
 
 [desktop]
-conversationDetailMode = "STEPS_COMMANDS"
+conversationDetailMode = "STEPS_PROSE"
 ambient-suggestions-enabled = false
 followUpQueueMode = "queue"
 
@@ -194,3 +206,17 @@ global = "zed"
 
 [notice.model_migrations]
 "gpt-5.4-mini" = "gpt-5.6-luna"
+
+[hooks.state]
+
+[hooks.state."unified-computer-use@openai-bundled:plugin.json#hooks[0]:subagent_stop:0:0"]
+trusted_hash = "sha256:9dc8e6e56fe1aaed56eba99d13697c5e0737ee0980c5437991b3480efef75667"
+
+[hooks.state."browser@openai-bundled:plugin.json#hooks[0]:subagent_stop:0:0"]
+trusted_hash = "sha256:2d941ada38ef1d54b6f5751c877d2219e81069061b50da10e4a8d7cd8896114d"
+
+[hooks.state."browser@openai-bundled:plugin.json#hooks[0]:stop:0:0"]
+trusted_hash = "sha256:317a07045dfc95aef2e80c55428a2f817e2768be867e3b1ef29a73da8636ae7f"
+
+[hooks.state."unified-computer-use@openai-bundled:plugin.json#hooks[0]:stop:0:0"]
+trusted_hash = "sha256:f41fe6e03250f6b7048987873f93fb818aaef2f9a068e21a9899a7ac3d78659b"
