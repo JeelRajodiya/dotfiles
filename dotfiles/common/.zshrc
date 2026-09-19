@@ -142,3 +142,7 @@ export PATH="/Library/TeX/texbin:$PATH"
 # opencode
 export OPENCODE_EXPERIMENTAL_LSP_TOOL=true
 export PATH=/Users/zeelrajodiya/.opencode/bin:$PATH
+
+
+# Added by Antigravity CLI installer
+export PATH="/Users/zeelrajodiya/.local/bin:$PATH"

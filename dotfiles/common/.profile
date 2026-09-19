@@ -292,3 +292,6 @@ function y() {
 # e6data engine
 # -----------------------------------------------------
 [ -f /Users/zeelrajodiya/Projects/e6data/scripts/run.sh ] && alias engine='/Users/zeelrajodiya/Projects/e6data/scripts/run.sh'
+
+# Added by Antigravity CLI installer
+export PATH="/Users/zeelrajodiya/.local/bin:$PATH"
