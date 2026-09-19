@@ -291,4 +291,4 @@ function y() {
 # -----------------------------------------------------
 # e6data engine
 # -----------------------------------------------------
-alias engine='/Users/zeelrajodiya/Projects/e6data/scripts/run.sh'
+[ -f /Users/zeelrajodiya/Projects/e6data/scripts/run.sh ] && alias engine='/Users/zeelrajodiya/Projects/e6data/scripts/run.sh'
