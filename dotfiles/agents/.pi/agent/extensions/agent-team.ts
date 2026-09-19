@@ -148,6 +148,10 @@ export default function (pi: ExtensionAPI) {
 		return { ...(variant?.all ?? {}), ...(variant?.[key(state.def.name)] ?? variant?.[state.def.name] ?? {}) };
 	};
 	const variantSettings = (state: AgentState) => variantSettingsFor(state);
+	const configuredDefaultVariant = (teamName = activeTeam) => {
+		const team = teamName ? teams[teamName] : undefined;
+		return team?.defaultVariant && team.variants?.[team.defaultVariant] ? team.defaultVariant : undefined;
+	};
 	const effectiveModel = (state: AgentState, ctx: any) => agentModelOverrides.get(key(state.name)) ?? variantSettings(state).model ?? state.def.model ?? parentModel(ctx);
 	const effectiveThinking = (state: AgentState, ctx: any): ThinkingLevel => resolveAgentThinking(variantSettings(state).thinking ?? state.def.thinking, ctx.thinkingLevel);
 	const hostFastMode = (ctx: any): boolean => {
@@ -240,16 +244,20 @@ export default function (pi: ExtensionAPI) {
 			const savedTeam = typeof saved?.team === "string" && teams[saved.team] ? saved.team : undefined;
 			activeTeam = savedTeam ?? (rootAgent && key(rootAgent.def.name) === key(teams[DEFAULT_TEAM]?.root ?? "") ? DEFAULT_TEAM : undefined);
 			const variants = activeTeam ? teams[activeTeam]?.variants : undefined;
-			activeVariant = typeof saved?.variant === "string" && variants?.[saved.variant] ? saved.variant : undefined;
+			const savedVariant = typeof saved?.variant === "string" && variants?.[saved.variant] ? saved.variant : undefined;
+			activeVariant = savedVariant ?? configuredDefaultVariant();
 			const baseline = saved?.rootBaseline;
 			if (baseline && typeof baseline.model === "string" && VALID_THINKING_LEVELS.includes(baseline.thinking) && typeof baseline.fast === "boolean") rootBaseline = baseline;
+			else if (activeVariant && rootAgent && !savedVariant) rootBaseline = currentRootSettings(ctx);
 			if (!activeVariant || rootAgent && !rootBaseline) { activeVariant = undefined; rootBaseline = undefined; }
+			if (!savedVariant && activeVariant) persistTeam();
 			return;
 		}
 		const legacy = entries.filter((entry: any) => entry.type === "custom" && entry.customType === "agent-team-mode").pop()?.data as LegacyTeamMode | undefined;
 		const legacyTeam = legacy?.team ?? DEFAULT_TEAM;
 		activeTeam = teams[legacyTeam] ? legacyTeam : undefined;
 		const team = activeTeam ? teams[activeTeam] : undefined;
+		activeVariant = configuredDefaultVariant();
 		for (const member of team?.members ?? []) {
 			const def = definitionFor(member);
 			if (def) addDefaultAgent(def);
@@ -259,6 +267,7 @@ export default function (pi: ExtensionAPI) {
 			if (def) addDefaultAgent(def);
 			rootAgent = def ? [...agentStates.values()].find(state => key(state.def.name) === key(def.name)) : undefined;
 		}
+		if (activeVariant && rootAgent) rootBaseline = currentRootSettings(ctx);
 		persistTeam();
 	}
 	function loadAgents(cwd: string) {
@@ -826,7 +835,7 @@ export default function (pi: ExtensionAPI) {
 		const choices = variantChoices();
 		if (!activeTeam || !teams[activeTeam]) throw new Error(`No active named team. Valid variants: ${choices.join(", ")}`);
 		if (!requested) { ctx.ui.notify(variantSummary(), "info"); return; }
-		const selected = requested === "default" ? undefined : variantNames().find(name => key(name) === key(requested));
+		const selected = requested === "default" ? configuredDefaultVariant() : variantNames().find(name => key(name) === key(requested));
 		if (requested !== "default" && !selected) throw new Error(`Unknown variant "${requested}". Valid variants: ${choices.join(", ")}`);
 		const blockers = () => [...agentStates.values()].filter(state => state !== rootAgent && (state.status === "running" || state.status === "waiting"));
 		const blocked = blockers();
@@ -854,7 +863,7 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.notify(variantSummary(), "info");
 	}
 	/** Seed for a replacement session; must match what activateTeam builds in place. */
-	const teamSnapshot = (teamName: string | undefined): SavedTeam => {
+	const teamSnapshot = (teamName: string | undefined, ctx: any): SavedTeam => {
 		const team = teamName ? teams[teamName] : undefined;
 		const instances: SavedInstance[] = [];
 		const addSnapshotInstance = (member: string): SavedInstance | undefined => {
@@ -871,12 +880,13 @@ export default function (pi: ExtensionAPI) {
 		};
 		for (const member of team?.members ?? []) addSnapshotInstance(member);
 		const root = team?.root ? addSnapshotInstance(team.root) : undefined;
-		return { instances, root: root?.name, team: teamName };
+		const variant = configuredDefaultVariant(teamName);
+		return { instances, root: root?.name, team: teamName, variant, rootBaseline: root && variant ? currentRootSettings(ctx) : undefined };
 	};
 	async function activateTeam(teamName: string | undefined, ctx: any) {
 		for (const state of agentStates.values()) { if (state.activeRun) terminateRun(state.activeRun); clearInterval(state.timer); state.timer = undefined; discardSession(state); }
 		agentStates.clear(); agentModelOverrides.clear(); agentFastOverrides.clear(); rootAgent = undefined; viewedAgent = undefined; rootModelRestored = true;
-		activeTeam = teamName; activeVariant = undefined; rootBaseline = undefined;
+		activeTeam = teamName; activeVariant = configuredDefaultVariant(teamName); rootBaseline = activeVariant ? currentRootSettings(ctx) : undefined;
 		pi.events.emit(OPENAI_FAST_SESSION_EVENT, { enabled: undefined });
 		// The queue matches deliveries to instances by position; dropped instances must drop with them.
 		pendingDeliveries.length = 0;
@@ -1039,7 +1049,7 @@ export default function (pi: ExtensionAPI) {
 				if (agentStates.size) {
 					const choice = await ctx.ui.select("Switch team session?", ["start fresh", "fork current session"]);
 					if (!choice) return;
-					const snapshot = teamSnapshot(selected);
+					const snapshot = teamSnapshot(selected, ctx);
 					const seedTargetSession = async (sessionManager: any) => {
 						sessionManager.appendCustomEntry("agent-team-instances", snapshot);
 						sessionManager.appendCustomEntry("agent-team-model-overrides", { overrides: {} });

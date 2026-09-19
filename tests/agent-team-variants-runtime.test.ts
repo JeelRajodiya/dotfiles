@@ -1,6 +1,6 @@
 // Run: node tests/agent-team-variants-runtime.test.ts
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -9,6 +9,8 @@ import { OPENAI_FAST_SESSION_EVENT } from "../dotfiles/agents/.pi/agent/extensio
 
 const agentDir = mkdtempSync(join(tmpdir(), "agent-team-variants-"));
 cpSync("dotfiles/agents/.pi/agent/agents", join(agentDir, "agents"), { recursive: true });
+const teamsFile = join(agentDir, "agents", "teams.yaml");
+writeFileSync(teamsFile, `${readFileSync(teamsFile, "utf8")}\nrootless:\n  default-variant: rootless-default\n  variants:\n    rootless-default:\n      all:\n        fast: false\n    rootless-other:\n      all:\n        fast: true\n`);
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = agentDir;
 try {
@@ -20,6 +22,7 @@ try {
 	const selections: string[] = [];
 	const modelChanges: string[] = [];
 	const thinkingChanges: string[] = [];
+	let seededEntries: any[] = [];
 	const events = new EventEmitter();
 	events.on(OPENAI_FAST_SESSION_EVENT, event => fastEvents.push(event));
 	const models = ["sol", "terra", "luna"].map(name => ({ provider: "openai-codex", id: `gpt-5.6-${name}`, contextWindow: 1000 }));
@@ -31,15 +34,20 @@ try {
 			find: (provider: string, id: string) => models.find(model => model.provider === provider && model.id === id),
 			getAvailable: () => models,
 		},
-		sessionManager: { getEntries: () => entries, getSessionId: () => "runtime-test" },
+		sessionManager: { getEntries: () => entries, getSessionId: () => "runtime-test", getSessionFile: () => "runtime-test.jsonl", getLeafId: () => undefined },
 		ui: {
 			addAutocompleteProvider: () => {}, setStatus: () => {}, setWidget: () => {},
 			notify: (message: string) => notifications.push(message),
-			select: async (message: string) => { selections.push(message); return undefined; },
+			select: async (message: string) => { selections.push(message); return message === "Switch team session?" ? "start fresh" : undefined; },
 		},
 		isIdle: () => true,
 		waitForIdle: async () => {},
 		getContextUsage: () => undefined,
+	};
+	ctx.newSession = async ({ setup, withSession }: any) => {
+		seededEntries = [];
+		await setup({ appendCustomEntry: (customType: string, data: unknown) => seededEntries.push({ type: "custom", customType, data }) });
+		await withSession({ ...ctx, sessionManager: { ...ctx.sessionManager, getEntries: () => seededEntries }, reload: async () => {} });
 	};
 	const pi: any = {
 		on: (name: string, handler: Function) => handlers.set(name, handler),
@@ -54,22 +62,62 @@ try {
 	agentTeam(pi);
 	await handlers.get("session_start")!({}, ctx);
 	const run = (args: string) => commands.get("agents").handler(args, ctx);
+	const savedVariant = () => entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data.variant;
 
-	await run("variant balanced-fast");
-	assert.equal(modelChanges.length, 0, "the orchestrator override keeps the root on sol");
+	assert.equal(ctx.model.id, "gpt-5.6-terra", "fresh startup selects balanced-terra automatically");
 	assert.equal(thinkingChanges.at(-1), "medium");
-	assert.deepEqual(fastEvents.at(-1), { enabled: false }, "the root stays standard while children use balanced-fast");
-	assert.equal(entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data.variant, "balanced-fast");
+	assert.deepEqual(fastEvents.at(-1), { enabled: false });
+	assert.equal(savedVariant(), "balanced-terra", "the resolved default variant is persisted");
+	await run("team default");
+	const seededTeam = seededEntries.find(entry => entry.customType === "agent-team-instances").data;
+	assert.deepEqual(seededTeam.rootBaseline, { model: "openai-codex/gpt-5.6-terra", thinking: "medium", fast: false });
+	assert.equal(seededTeam.variant, "balanced-terra");
+	entries.splice(0, entries.length, ...seededEntries);
+	await handlers.get("session_start")!({}, ctx);
+	assert.equal(savedVariant(), "balanced-terra", "a seeded team snapshot restores its configured default variant");
 	await run("model worker");
 	assert.match(selections.at(-1)!, /gpt-5\.6-terra \(variant\)/, "child settings use the active variant");
 
+	await run("variant balanced-terra-fast");
+	assert.equal(ctx.model.id, "gpt-5.6-terra", "a Terra root remains Terra in a fast variant");
+	assert.deepEqual(fastEvents.at(-1), { enabled: true }, "a Terra root enables fast mode in a -fast variant");
+	assert.equal(savedVariant(), "balanced-terra-fast", "selected variants persist");
+	await handlers.get("session_start")!({}, ctx);
+	assert.deepEqual(fastEvents.at(-1), { enabled: true }, "the persisted fast variant restores on startup");
+
 	await run("variant default");
-	assert.equal(ctx.model.id, "gpt-5.6-sol", "default restores the pre-variant root model");
+	assert.equal(ctx.model.id, "gpt-5.6-terra", "default resolves to balanced-terra");
 	assert.deepEqual(fastEvents.at(-1), { enabled: false });
-	assert.equal(entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data.variant, undefined);
+	assert.equal(savedVariant(), "balanced-terra", "default persists the configured variant");
+
+	// A pre-default snapshot migrates once while the host is still on its original settings.
+	entries.splice(0, entries.length, {
+		type: "custom", customType: "agent-team-instances", data: {
+			instances: ["orchestrator", "tracer", "worker", "reviewer"].map(name => ({ name, type: name, goal: name, sessionKey: name })),
+			root: "orchestrator", team: "default",
+		},
+	});
+	ctx.model = models[0];
+	await handlers.get("session_start")!({}, ctx);
+	const migrated = entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data;
+	assert.equal(migrated.variant, "balanced-terra", "a snapshot without a variant persists the configured default");
+	assert.deepEqual(migrated.rootBaseline, { model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast: false });
+	await handlers.get("session_start")!({}, ctx);
+	const restored = entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data;
+	assert.equal(restored.variant, "balanced-terra", "the migrated variant remains stable on reload");
+	assert.deepEqual(restored.rootBaseline, migrated.rootBaseline, "reload keeps the original pre-variant baseline");
 
 	await run("variant missing");
-	assert.match(notifications.at(-1)!, /Unknown variant.*quality.*turbo\+/);
+	assert.match(notifications.at(-1)!, /Unknown variant.*quality-sol.*turbo-plus-terra-fast/);
+
+	entries.splice(0, entries.length, { type: "custom", customType: "agent-team-instances", data: { instances: [], team: "rootless" } });
+	await handlers.get("session_start")!({}, ctx);
+	const rootless = entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data;
+	assert.equal(rootless.variant, "rootless-default", "a rootless snapshot persists its resolved default variant");
+	assert.equal(rootless.rootBaseline, undefined, "a rootless team has no root baseline");
+	writeFileSync(teamsFile, readFileSync(teamsFile, "utf8").replace("default-variant: rootless-default", "default-variant: rootless-other"));
+	await handlers.get("session_start")!({}, ctx);
+	assert.equal(entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data.variant, "rootless-default", "the persisted rootless variant survives a later default change");
 } finally {
 	if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = previousAgentDir;

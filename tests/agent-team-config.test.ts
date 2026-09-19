@@ -12,7 +12,7 @@ const frontmatter = (path: string) => Object.fromEntries(
 const team = read("agents/teams.yaml");
 const orchestrator = read("agents/orchestrator.md");
 const agentTeam = read("extensions/agent-team.ts");
-assert.match(team, /^default:\n  main: orchestrator\n  auto-spawn: true\n  auto-spawn-limit: 3\n  subs:\n    - tracer\n    - worker\n    - reviewer\n  variants:/m);
+assert.match(team, /^default:\n  main: orchestrator\n  auto-spawn: true\n  auto-spawn-limit: 3\n  default-variant: balanced-terra\n  subs:\n    - tracer\n    - worker\n    - reviewer\n  variants:/m);
 assert.match(read("settings.json"), /"npm:@juicesharp\/rpiv-ask-user-question"/);
 assert.deepEqual(frontmatter("agents/orchestrator.md"), {
 	name: "orchestrator",
@@ -34,7 +34,9 @@ const reviewer = frontmatter("agents/reviewer.md");
 assert.deepEqual({ model: reviewer.model, thinking: reviewer.thinking, fast: reviewer.fast }, {
 	model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast: "false",
 }, "Reviewer pins its own depth instead of inheriting whatever the host is set to");
-const variants = parseTeams(team).default.variants!;
+const parsed = parseTeams(team).default;
+const variants = parsed.variants!;
+assert.equal(parsed.defaultVariant, "balanced-terra");
 const base = { orchestrator: frontmatter("agents/orchestrator.md"), worker, tracer, reviewer };
 const outcome = (variant: string, agent: keyof typeof base) => ({
 	model: variants[variant][agent]?.model ?? variants[variant].all?.model ?? base[agent].model,
@@ -45,44 +47,37 @@ const sol = "openai-codex/gpt-5.6-sol";
 const terra = "openai-codex/gpt-5.6-terra";
 const luna = "openai-codex/gpt-5.6-luna";
 const spark = "openai-codex/gpt-5.3-codex-spark";
-const same = (model: string, fast: boolean) => ({
-	orchestrator: { model, thinking: "medium", fast },
-	worker: { model, thinking: "medium", fast },
-	tracer: { model, thinking: "medium", fast },
-	reviewer: { model, thinking: "medium", fast },
+const profile = (orchestrator: [string, boolean], tracer: [string, boolean], worker: [string, boolean], reviewer: [string, boolean], workerThinking = "medium") => ({
+	orchestrator: { model: orchestrator[0], thinking: "medium", fast: orchestrator[1] },
+	tracer: { model: tracer[0], thinking: "medium", fast: tracer[1] },
+	worker: { model: worker[0], thinking: workerThinking, fast: worker[1] },
+	reviewer: { model: reviewer[0], thinking: "medium", fast: reviewer[1] },
 });
 const profiles = {
-	quality: { ...same(sol, false), worker: { model: sol, thinking: "low", fast: false } },
-	"quality-fast": { ...same(sol, true), orchestrator: { model: sol, thinking: "medium", fast: false }, worker: { model: sol, thinking: "low", fast: true } },
-	balanced: {
-		...same(terra, false), orchestrator: { model: sol, thinking: "medium", fast: false },
-		reviewer: { model: sol, thinking: "medium", fast: false },
-	},
-	"balanced-fast": {
-		...same(terra, true), orchestrator: { model: sol, thinking: "medium", fast: false },
-		reviewer: { model: sol, thinking: "medium", fast: true },
-	},
-	economy: { ...same(luna, false), orchestrator: { model: sol, thinking: "medium", fast: false } },
-	"economy-fast": { ...same(luna, true), orchestrator: { model: sol, thinking: "medium", fast: false } },
-	sprint: {
-		...same(terra, true), orchestrator: { model: sol, thinking: "medium", fast: false },
-		worker: { model: spark, thinking: "medium", fast: false }, reviewer: { model: spark, thinking: "medium", fast: false },
-	},
-	turbo: { ...same(sol, true), orchestrator: { model: sol, thinking: "medium", fast: false }, worker: { model: spark, thinking: "medium", fast: false } },
-	"turbo+": {
-		...same(sol, true), orchestrator: { model: sol, thinking: "medium", fast: false },
-		tracer: { model: spark, thinking: "medium", fast: false }, worker: { model: spark, thinking: "medium", fast: false },
-	},
+	"quality-sol": profile([sol, false], [sol, false], [sol, false], [sol, false], "low"),
+	"quality-sol-fast": profile([sol, false], [sol, true], [sol, true], [sol, true], "low"),
+	"balanced-sol": profile([sol, false], [terra, false], [terra, false], [sol, false]),
+	"balanced-sol-fast": profile([sol, false], [terra, true], [terra, true], [sol, true]),
+	"balanced-terra": profile([terra, false], [terra, false], [terra, false], [sol, false]),
+	"balanced-terra-fast": profile([terra, true], [terra, true], [terra, true], [sol, true]),
+	"economy-sol": profile([sol, false], [luna, false], [luna, false], [luna, false]),
+	"economy-sol-fast": profile([sol, false], [luna, true], [luna, true], [luna, true]),
+	"economy-terra": profile([terra, false], [luna, false], [luna, false], [luna, false]),
+	"economy-terra-fast": profile([terra, true], [luna, true], [luna, true], [luna, true]),
+	"sprint-sol": profile([sol, false], [terra, false], [spark, false], [spark, false]),
+	"sprint-sol-fast": profile([sol, false], [terra, true], [spark, false], [spark, false]),
+	"turbo-sol": profile([sol, false], [sol, false], [spark, false], [sol, false]),
+	"turbo-sol-fast": profile([sol, false], [sol, true], [spark, false], [sol, true]),
+	"turbo-terra": profile([terra, false], [sol, false], [spark, false], [sol, false]),
+	"turbo-terra-fast": profile([terra, true], [sol, true], [spark, false], [sol, true]),
+	"turbo-plus-sol": profile([sol, false], [spark, false], [spark, false], [sol, false]),
+	"turbo-plus-sol-fast": profile([sol, false], [spark, false], [spark, false], [sol, true]),
+	"turbo-plus-terra": profile([terra, false], [spark, false], [spark, false], [sol, false]),
+	"turbo-plus-terra-fast": profile([terra, true], [spark, false], [spark, false], [sol, true]),
 };
-assert.deepEqual(Object.keys(variants), Object.keys(profiles), "catalog has exactly the nine purpose-named profiles");
-for (const [name, expected] of Object.entries(profiles)) {
-	for (const agent of Object.keys(base) as (keyof typeof base)[]) {
-		const actual = outcome(name, agent);
-		assert.deepEqual(actual, expected[agent], `${name}/${agent}`);
-		if (agent === "orchestrator") assert.equal(actual.fast, false, `${name}/orchestrator never enables fast`);
-		if (actual.model === luna || actual.model === spark) assert.equal(actual.thinking, "medium", `${name}/${agent} stays medium`);
-		if (actual.model === spark) assert.equal(actual.fast, false, `${name}/${agent} Spark never enables fast`);
-	}
+assert.deepEqual(Object.keys(variants), Object.keys(profiles), "catalog has exactly the 20 approved profiles");
+for (const [name, expected] of Object.entries(profiles)) for (const agent of Object.keys(base) as (keyof typeof base)[]) {
+	assert.deepEqual(outcome(name, agent), expected[agent], `${name}/${agent}`);
 }
 const reviewerPrompt = read("agents/reviewer.md");
 for (const level of ["P0", "P1", "P2"]) assert.match(reviewerPrompt, new RegExp(`\\[${level}\\]`), `Reviewer defines ${level}`);
@@ -109,7 +104,7 @@ assert.equal(agentTeam.match(/=== "worker" && !approved/g)?.length, 3, "dispatch
 // definition, not to whatever the host happens to be set to.
 assert.match(agentTeam, /state\.activeRun\?\.thinking \?\? effectiveThinking\(state, widgetCtx\)/);
 assert.match(agentTeam, /relation=related steers only the named running instance/);
-assert.match(orchestrator, /answer with peek_agent: it reads that instance's activity log without prompting it\./);
+assert.match(orchestrator, /peek_agent reads that instance's activity log without prompting it\./);
 assert.match(orchestrator, /Never dispatch or steer a running agent just to request a status update\./);
 assert.match(agentTeam, /Never dispatch or steer an agent merely to ask for a status update/);
 console.log("agent-team default configuration check passed");

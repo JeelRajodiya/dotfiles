@@ -2,19 +2,20 @@ default:
   main: orchestrator
   auto-spawn: true
   auto-spawn-limit: 3
+  default-variant: balanced-terra
   subs:
     - tracer
     - worker
     - reviewer
   variants:
-    quality:
+    quality-sol:
       all:
         model: openai-codex/gpt-5.6-sol
         thinking: medium
         fast: false
       worker:
         thinking: low
-    quality-fast:
+    quality-sol-fast:
       all:
         model: openai-codex/gpt-5.6-sol
         thinking: medium
@@ -23,37 +24,48 @@ default:
         fast: false
       worker:
         thinking: low
-    balanced:
+    balanced-sol:
+      all:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
+        fast: false
+      tracer:
+        model: openai-codex/gpt-5.6-terra
+      worker:
+        model: openai-codex/gpt-5.6-terra
+    balanced-sol-fast:
+      all:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
+        fast: true
+      orchestrator:
+        fast: false
+      tracer:
+        model: openai-codex/gpt-5.6-terra
+      worker:
+        model: openai-codex/gpt-5.6-terra
+    balanced-terra:
       all:
         model: openai-codex/gpt-5.6-terra
         thinking: medium
         fast: false
-      orchestrator:
-        model: openai-codex/gpt-5.6-sol
       reviewer:
         model: openai-codex/gpt-5.6-sol
-        thinking: medium
-        fast: false
-    balanced-fast:
+    balanced-terra-fast:
       all:
         model: openai-codex/gpt-5.6-terra
         thinking: medium
         fast: true
-      orchestrator:
-        model: openai-codex/gpt-5.6-sol
-        fast: false
       reviewer:
         model: openai-codex/gpt-5.6-sol
-        thinking: medium
-        fast: true
-    economy:
+    economy-sol:
       all:
         model: openai-codex/gpt-5.6-luna
         thinking: medium
         fast: false
       orchestrator:
         model: openai-codex/gpt-5.6-sol
-    economy-fast:
+    economy-sol-fast:
       all:
         model: openai-codex/gpt-5.6-luna
         thinking: medium
@@ -61,23 +73,47 @@ default:
       orchestrator:
         model: openai-codex/gpt-5.6-sol
         fast: false
-    sprint:
+    economy-terra:
       all:
+        model: openai-codex/gpt-5.6-luna
+        thinking: medium
+        fast: false
+      orchestrator:
         model: openai-codex/gpt-5.6-terra
+    economy-terra-fast:
+      all:
+        model: openai-codex/gpt-5.6-luna
         thinking: medium
         fast: true
       orchestrator:
+        model: openai-codex/gpt-5.6-terra
+    sprint-sol:
+      all:
+        model: openai-codex/gpt-5.3-codex-spark
+        thinking: medium
+        fast: false
+      orchestrator:
         model: openai-codex/gpt-5.6-sol
+      tracer:
+        model: openai-codex/gpt-5.6-terra
+    sprint-sol-fast:
+      all:
+        model: openai-codex/gpt-5.3-codex-spark
+        thinking: medium
+        fast: false
+      orchestrator:
+        model: openai-codex/gpt-5.6-sol
+      tracer:
+        model: openai-codex/gpt-5.6-terra
+        fast: true
+    turbo-sol:
+      all:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
         fast: false
       worker:
         model: openai-codex/gpt-5.3-codex-spark
-        thinking: medium
-        fast: false
-      reviewer:
-        model: openai-codex/gpt-5.3-codex-spark
-        thinking: medium
-        fast: false
-    turbo:
+    turbo-sol-fast:
       all:
         model: openai-codex/gpt-5.6-sol
         thinking: medium
@@ -86,9 +122,36 @@ default:
         fast: false
       worker:
         model: openai-codex/gpt-5.3-codex-spark
+        fast: false
+    turbo-terra:
+      all:
+        model: openai-codex/gpt-5.6-sol
         thinking: medium
         fast: false
-    turbo+:
+      orchestrator:
+        model: openai-codex/gpt-5.6-terra
+      worker:
+        model: openai-codex/gpt-5.3-codex-spark
+    turbo-terra-fast:
+      all:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
+        fast: true
+      orchestrator:
+        model: openai-codex/gpt-5.6-terra
+      worker:
+        model: openai-codex/gpt-5.3-codex-spark
+        fast: false
+    turbo-plus-sol:
+      all:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
+        fast: false
+      tracer:
+        model: openai-codex/gpt-5.3-codex-spark
+      worker:
+        model: openai-codex/gpt-5.3-codex-spark
+    turbo-plus-sol-fast:
       all:
         model: openai-codex/gpt-5.6-sol
         thinking: medium
@@ -97,11 +160,33 @@ default:
         fast: false
       tracer:
         model: openai-codex/gpt-5.3-codex-spark
-        thinking: medium
         fast: false
       worker:
         model: openai-codex/gpt-5.3-codex-spark
+        fast: false
+    turbo-plus-terra:
+      all:
+        model: openai-codex/gpt-5.6-sol
         thinking: medium
+        fast: false
+      orchestrator:
+        model: openai-codex/gpt-5.6-terra
+      tracer:
+        model: openai-codex/gpt-5.3-codex-spark
+      worker:
+        model: openai-codex/gpt-5.3-codex-spark
+    turbo-plus-terra-fast:
+      all:
+        model: openai-codex/gpt-5.6-sol
+        thinking: medium
+        fast: true
+      orchestrator:
+        model: openai-codex/gpt-5.6-terra
+      tracer:
+        model: openai-codex/gpt-5.3-codex-spark
+        fast: false
+      worker:
+        model: openai-codex/gpt-5.3-codex-spark
         fast: false
 
 plan-build:

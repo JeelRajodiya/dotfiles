@@ -17,12 +17,10 @@ const configuredTeams = parseTeams(readFileSync("dotfiles/agents/.pi/agent/agent
 assert.deepEqual(configuredTeams["tracer-worker"], {
 	root: "tracer", members: ["worker"],
 });
-assert.deepEqual(configuredTeams.default.variants?.["turbo+"], {
-	all: { model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast: true },
-	orchestrator: { fast: false },
-	tracer: { model: "openai-codex/gpt-5.3-codex-spark", thinking: "medium", fast: false },
-	worker: { model: "openai-codex/gpt-5.3-codex-spark", thinking: "medium", fast: false },
-}, "the dependency-free parser accepts turbo+");
+assert.equal(configuredTeams.default.defaultVariant, "balanced-terra");
+assert.deepEqual(parseTeams("team:\n  default-variant: preferred\n  variants:\n    preferred:\n      all:\n        fast: false\n"), {
+	team: { members: [], defaultVariant: "preferred", variants: { preferred: { all: { fast: false } } } },
+}, "the dependency-free parser accepts a team default variant");
 assert.deepEqual(parseTeams("legacy:\n  main: root\n  subs:\n    - worker\n"), {
 	legacy: { root: "root", members: ["worker"] },
 });

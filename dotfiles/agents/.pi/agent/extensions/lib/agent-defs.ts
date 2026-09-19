@@ -99,6 +99,7 @@ export interface TeamDef {
 	root?: string;
 	autoSpawn?: boolean;
 	autoSpawnLimit?: number;
+	defaultVariant?: string;
 	variants?: Record<string, Record<string, AgentVariantSetting>>;
 }
 
@@ -132,6 +133,7 @@ export function parseTeams(text: string): Record<string, TeamDef> {
 			if (name === "main" && value) team.root = value;
 			else if (name === "auto-spawn" && /^(true|false)$/i.test(value)) team.autoSpawn = value.toLowerCase() === "true";
 			else if (name === "auto-spawn-limit" && /^\d+$/.test(value)) team.autoSpawnLimit = Number(value);
+			else if (name === "default-variant" && value) team.defaultVariant = value;
 			section = undefined;
 			continue;
 		}
