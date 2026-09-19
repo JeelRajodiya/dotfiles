@@ -23,6 +23,7 @@ try {
 	const modelChanges: string[] = [];
 	const thinkingChanges: string[] = [];
 	let seededEntries: any[] = [];
+	let autocompleteProvider: any;
 	const events = new EventEmitter();
 	events.on(OPENAI_FAST_SESSION_EVENT, event => fastEvents.push(event));
 	const models = ["sol", "terra", "luna"].map(name => ({ provider: "openai-codex", id: `gpt-5.6-${name}`, contextWindow: 1000 }));
@@ -36,7 +37,7 @@ try {
 		},
 		sessionManager: { getEntries: () => entries, getSessionId: () => "runtime-test", getSessionFile: () => "runtime-test.jsonl", getLeafId: () => undefined },
 		ui: {
-			addAutocompleteProvider: () => {}, setStatus: () => {}, setWidget: () => {},
+			addAutocompleteProvider: (provider: any) => { autocompleteProvider = provider; }, setStatus: () => {}, setWidget: () => {},
 			notify: (message: string) => notifications.push(message),
 			select: async (message: string) => { selections.push(message); return message === "Switch team session?" ? "start fresh" : undefined; },
 		},
@@ -68,6 +69,10 @@ try {
 	assert.equal(thinkingChanges.at(-1), "medium");
 	assert.deepEqual(fastEvents.at(-1), { enabled: false });
 	assert.equal(savedVariant(), "balanced-terra", "the resolved default variant is persisted");
+	const autocomplete = autocompleteProvider({ getSuggestions: () => null });
+	const variantSuggestions = await autocomplete.getSuggestions(["/agents variant "], 0, 16, { force: true });
+	assert.ok(variantSuggestions.items.some((item: any) => item.label === "balanced-terra"));
+	assert.ok(!variantSuggestions.items.some((item: any) => item.label === "default"), "default is a hidden compatibility alias");
 	await run("team default");
 	const seededTeam = seededEntries.find(entry => entry.customType === "agent-team-instances").data;
 	assert.deepEqual(seededTeam.rootBaseline, { model: "openai-codex/gpt-5.6-terra", thinking: "medium", fast: false });
