@@ -41,7 +41,7 @@
   "tui": "default",
   "theme": "dark-ansi",
   "editorMode": "vim",
-  "verbose": true,
+  "verbose": false,
   "autoScrollEnabled": true,
   "remoteControlAtStartup": false,
   "inputNeededNotifEnabled": true,
