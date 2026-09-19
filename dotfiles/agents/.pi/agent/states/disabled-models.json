@@ -1,5 +1,13 @@
 [
   "openai-codex/gpt-5.5",
   "openai-codex/gpt-5.4",
-  "openai-codex/gpt-5.4-mini"
+  "openai-codex/gpt-5.4-mini",
+  "antigravity/gemini-2.5-pro",
+  "antigravity/gemini-2.5-flash-lite",
+  "antigravity/gemini-2.5-flash",
+  "antigravity/gemini-3-flash",
+  "antigravity/gemini-3.1-flash-lite",
+  "antigravity/gemini-3.5-flash",
+  "antigravity/gemini-3.6-flash",
+  "antigravity/gemini-3.7-flash"
 ]
