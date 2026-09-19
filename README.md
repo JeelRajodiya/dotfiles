@@ -1,4 +1,13 @@
-Personal Linux and macOS configuration, originally forked from [Codesmith28/archConfig](https://github.com/Codesmith28/archConfig).
+My personal Linux and macOS configuration, originally forked from [Codesmith28/archConfig](https://github.com/Codesmith28/archConfig).
+
+## Highlight: PI Agent Configurations 
+
+<img width="2056" height="1222" alt="image" src="https://github.com/user-attachments/assets/8d153208-eda3-4678-b699-abbd6b01c402" />
+
+
+Find it in [`/agents/.pi`](https://github.com/JeelRajodiya/environment/tree/2026/dotfiles/agents/.pi) 
+
+
 
 ## Setup
 
