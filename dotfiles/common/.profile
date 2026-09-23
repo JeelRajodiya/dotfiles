@@ -47,8 +47,9 @@ export PATH="$PATH:${GOPATH:-$HOME/go}/bin"
 # SDKMAN
 export SDKMAN_DIR="$HOME/.sdkman"
 
-# Java — guard against empty JAVA_HOME producing a stray ":/bin"
-[ -n "$JAVA_HOME" ] && export PATH="$PATH:$JAVA_HOME/bin"
+# Java — SDKMAN JDKs are not registered with macOS java_home.
+export JAVA_HOME="${JAVA_HOME:-$SDKMAN_DIR/candidates/java/current}"
+[ -x "$JAVA_HOME/bin/java" ] && export PATH="$JAVA_HOME/bin:$PATH"
 
 # -----------------------------------------------------
 # Tool configuration
