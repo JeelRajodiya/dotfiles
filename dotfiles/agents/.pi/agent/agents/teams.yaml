@@ -16,19 +16,30 @@ default:
       orchestrator:
         model: openai-codex/gpt-6-astra
         thinking: low
-    balanced:
+    balanced-sol:
       all:
         model: openai-codex/gpt-6-luna
-        thinking: max
+        thinking: high
         fast: false
       orchestrator:
         model: openai-codex/gpt-6-sol
-        thinking: medium
+        thinking: high
+    balanced-astra:
+      all:
+        model: openai-codex/gpt-6-luna
+        thinking: high
+        fast: false
+      orchestrator:
+        model: openai-codex/gpt-6-astra
+        thinking: low
     economy:
       all:
         model: openai-codex/gpt-6-luna
-        thinking: max
+        thinking: high
         fast: false
+      orchestrator:
+        model: openai-codex/gpt-6-luna
+        thinking: max
 
 plan-build:
   - planner
