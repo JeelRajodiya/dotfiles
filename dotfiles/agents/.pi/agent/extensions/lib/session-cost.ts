@@ -50,18 +50,20 @@ export function parseSessionLines(text: string): SessionRecord[] {
 }
 
 /** Records for every session file, re-parsing only the files that changed since the last call. */
-export async function loadSessions(): Promise<SessionRecord[][]> {
-	const sessionsDir = join(getAgentDir(), "sessions");
-	let files: string[];
-	try {
-		files = (await readdir(sessionsDir, { recursive: true })).filter(file => file.endsWith(".jsonl"));
-	} catch {
-		return [];
-	}
-	const live = new Set<string>();
-	const sessions = await Promise.all(files.map(async file => {
-		const path = join(sessionsDir, file);
-		live.add(path);
+export async function loadSessions(agentDir = getAgentDir()): Promise<SessionRecord[][]> {
+	const sources = [["sessions", ".jsonl"], ["agent-team-sessions", ".json"]] as const;
+	const files = (await Promise.all(sources.map(async ([directory, suffix]) => {
+		const dir = join(agentDir, directory);
+		try {
+			return (await readdir(dir, { recursive: true }))
+				.filter(file => file.endsWith(suffix))
+				.map(file => join(dir, file));
+		} catch {
+			return [];
+		}
+	}))).flat();
+	const live = new Set(files);
+	const sessions = await Promise.all(files.map(async path => {
 		try {
 			const stats = await stat(path);
 			const cached = cache.get(path);

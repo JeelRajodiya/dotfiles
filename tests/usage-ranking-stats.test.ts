@@ -4,8 +4,11 @@
 // PI_USAGE_RANK_SELF_TEST env guard, which meant bin/check.sh never ran them and the extension
 // shipped 70 lines of test code to every session.
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { parseSessionLines } from "../dotfiles/agents/.pi/agent/extensions/lib/session-cost.ts";
+import { loadSessions, parseSessionLines } from "../dotfiles/agents/.pi/agent/extensions/lib/session-cost.ts";
 import {
 	alignColumns,
 	commandFromText,
@@ -66,6 +69,33 @@ scanSession(session, messages, costs, requests);
 assert.equal(messages.get("test/sol"), 1);
 assert.equal(requests.get("test/sol"), 2);
 assert.equal(costs.get("test/sol"), 1.75);
+
+const agentDir = await mkdtemp(join(tmpdir(), "pi-session-cost-"));
+try {
+	const teamDir = join(agentDir, "agent-team-sessions", "child");
+	const regularDir = join(agentDir, "sessions");
+	await mkdir(teamDir, { recursive: true });
+	await mkdir(regularDir);
+	const lunaSession = (cost: number) => [
+		JSON.stringify({ type: "model_change", provider: "openai-codex", modelId: "gpt-6-luna" }),
+		JSON.stringify({ type: "message", timestamp, message: { role: "user" } }),
+		JSON.stringify({ type: "message", timestamp, message: { role: "assistant", provider: "openai-codex", model: "gpt-6-luna", usage: { cost: { total: cost } } } }),
+	].join("\n");
+	await writeFile(join(teamDir, "child.json"), lunaSession(1.25));
+	await writeFile(join(regularDir, "regular.jsonl"), lunaSession(0.5));
+
+	const loaded = await loadSessions(agentDir);
+	assert.equal(loaded.length, 2, "loads team .json and regular .jsonl sessions");
+	const counts = new Map<string, number>();
+	const costs = new Map<string, number>();
+	const requests = new Map<string, number>();
+	for (const records of loaded) scanSession(records, counts, costs, requests);
+	assert.equal(counts.get("openai-codex/gpt-6-luna"), 2);
+	assert.equal(requests.get("openai-codex/gpt-6-luna"), 2);
+	assert.equal(costs.get("openai-codex/gpt-6-luna"), 1.75);
+} finally {
+	await rm(agentDir, { recursive: true, force: true });
+}
 
 assert.equal(requestsPerMessage(5, 2), "2.5 req/msg");
 assert.equal(requestsPerMessage(0, 1), "0.0 req/msg");
