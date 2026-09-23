@@ -1,7 +1,7 @@
 ---
 name: worker
 description: Implement and verify a focused codebase change
-model: openai-codex/gpt-5.6-sol
+model: openai-codex/gpt-6-astra
 thinking: low
 fast: true
 limitations: Only approved plans; stop for blockers or material scope changes.

@@ -17,7 +17,7 @@ const configuredTeams = parseTeams(readFileSync("dotfiles/agents/.pi/agent/agent
 assert.deepEqual(configuredTeams["tracer-worker"], {
 	root: "tracer", members: ["worker"],
 });
-assert.equal(configuredTeams.default.defaultVariant, "balanced-terra");
+assert.equal(configuredTeams.default.defaultVariant, "balanced");
 assert.deepEqual(parseTeams("team:\n  default-variant: preferred\n  variants:\n    preferred:\n      all:\n        fast: false\n"), {
 	team: { members: [], defaultVariant: "preferred", variants: { preferred: { all: { fast: false } } } },
 }, "the dependency-free parser accepts a team default variant");
@@ -85,7 +85,7 @@ assert.equal(parseOpenAIFastEnvValue("on"), true);
 assert.equal(parseOpenAIFastEnvValue("off"), false);
 assert.equal(parseOpenAIFastEnvValue("maybe"), undefined);
 
-assert.equal(formatAgentModelLabel("openai-codex/gpt-5.6-sol", true), "gpt-5.6-sol (fast)");
+assert.equal(formatAgentModelLabel("openai-codex/gpt-6-sol", true), "gpt-6-sol (fast)");
 assert.equal(formatAgentModelLabel("anthropic/claude-4", true), "claude-4");
 
 const plainTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
@@ -118,7 +118,7 @@ const card = renderCard({ name: "tracer-b", def: { name: "tracer", description: 
 assert.match(card.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, ""), /Tracer B/, "cards show the spaced, capitalised form");
 const elapsedAgent = {
 	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "done" as const,
-	model: "openai-codex/gpt-5.6-sol", fast: true, thinking: "high", toolCount: 7, elapsed: 12_000, contextTokens: 0,
+	model: "openai-codex/gpt-6-sol", fast: true, thinking: "high", toolCount: 7, elapsed: 12_000, contextTokens: 0,
 	contextWindow: 0, tokens: { input: 1_200, output: 300 },
 };
 const elapsedCard = renderCard(elapsedAgent, 80, plainTheme);
@@ -141,11 +141,11 @@ for (const width of [200, 120, 60, 24, 10]) {
 assert.equal(new CallLine(header, longTask).render(200)[0], `${header}${longTask}`, "a task that fits is not cut short of the terminal");
 assert.equal(new CallLine(header, callTail(undefined)).render(60)[0], header, "no task leaves no dangling separator");
 assert.equal(callTail("Line one.\n\n  - step two"), " — Line one. - step two", "a multi-line plan is flattened before it is drawn");
-assert.match(elapsedCard[2], /gpt-5.6-sol \(fast\) · high/);
+assert.match(elapsedCard[2], /gpt-6-sol \(fast\) · high/);
 
 const waitingCard = renderCard({
 	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "waiting",
-	pendingOutcome: "error", model: "openai-codex/gpt-5.6-sol", fast: true, toolCount: 0, elapsed: 0, contextTokens: 0,
+	pendingOutcome: "error", model: "openai-codex/gpt-6-sol", fast: true, toolCount: 0, elapsed: 0, contextTokens: 0,
 	contextWindow: 0, tokens: { input: 1_200, output: 300 },
 }, 20, plainTheme);
 assert.equal(waitingCard.length, 4);
@@ -155,11 +155,11 @@ assert.notEqual(waitingCard[2].trim(), "│                │");
 const grid = renderGrid([
 	{
 		name: "agent-a", def: { name: "agent-a", description: "" }, goal: "", task: "", status: "done", toolCount: 0, elapsed: 0, contextTokens: 0,
-		contextWindow: 0, tokens: { input: 1_000, output: 500 }, model: "openai-codex/gpt-5.6-sol", fast: true,
+		contextWindow: 0, tokens: { input: 1_000, output: 500 }, model: "openai-codex/gpt-6-sol", fast: true,
 	},
 	{
 		name: "agent-b", def: { name: "agent-b", description: "" }, goal: "", task: "", status: "done", toolCount: 0, elapsed: 0, contextTokens: 0,
-		contextWindow: 0, tokens: { input: 2_000, output: 600 }, model: "openai-codex/gpt-5.6-sol", fast: true,
+		contextWindow: 0, tokens: { input: 2_000, output: 600 }, model: "openai-codex/gpt-6-sol", fast: true,
 	},
 	{
 		name: "agent-c", def: { name: "agent-c", description: "" }, goal: "", task: "", status: "done", toolCount: 0, elapsed: 0, contextTokens: 0,
@@ -167,20 +167,20 @@ const grid = renderGrid([
 	},
 ], 80, 3, plainTheme);
 assert.equal(grid.length, 4);
-assert.match(grid.join("\n"), /↑↓ gpt-5.6-sol/);
+assert.match(grid.join("\n"), /↑↓ gpt-6-sol/);
 
 const coloredTheme = { fg: (_color: string, text: string) => `\x1b[31m${text}\x1b[0m`, bold: (text: string) => `\x1b[1m${text}\x1b[0m` };
 assert.equal(renderCard({
 	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "running",
-	model: "openai-codex/gpt-5.6-sol", thinking: "high", toolCount: 0, elapsed: 0, contextTokens: 0, contextWindow: 0, tokens: { input: 0, output: 0 },
+	model: "openai-codex/gpt-6-sol", thinking: "high", toolCount: 0, elapsed: 0, contextTokens: 0, contextWindow: 0, tokens: { input: 0, output: 0 },
 }, 20, coloredTheme).every(line => visibleWidth(line) <= 20), true);
 
 const detail = renderDetail({
 	name: "iterate", def: { name: "iterate", description: "" }, goal: "", task: "", status: "done",
 	toolCount: 0, elapsed: 1_000, contextTokens: 0, contextWindow: 0, tokens: { input: 0, output: 0 },
-	model: "openai-codex/gpt-5.6-sol", fast: true,
-}, 120, plainTheme, { model: formatAgentModelLabel("openai-codex/gpt-5.6-sol", true), activity: [], steerable: true }, 1);
-assert.match(detail, /gpt-5.6-sol \(fast\)/);
+	model: "openai-codex/gpt-6-sol", fast: true,
+}, 120, plainTheme, { model: formatAgentModelLabel("openai-codex/gpt-6-sol", true), activity: [], steerable: true }, 1);
+assert.match(detail, /gpt-6-sol \(fast\)/);
 
 assert.equal(formatToolActivity("bash", { command: "git status --short" }), "git status --short");
 assert.equal(formatToolActivity("read", { path: "src/main.ts" }), "Read src/main.ts");

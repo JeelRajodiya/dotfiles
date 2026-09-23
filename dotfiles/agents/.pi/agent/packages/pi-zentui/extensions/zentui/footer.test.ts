@@ -30,23 +30,23 @@ describe("inline footer metadata", () => {
 		} as unknown as ZentuiConfig;
 		expect(
 			renderMinimalistModelThinking(
-				{ cwd: "", modelLabel: "gpt-5.6-sol (fast)", thinkingLevel: "medium" },
+				{ cwd: "", modelLabel: "gpt-6-sol (fast)", thinkingLevel: "medium" },
 				theme,
 				config,
 			),
 		).toBe(
-			"<syntaxFunction>gpt-5.6-sol (fast)</syntaxFunction><syntaxFunction> – </syntaxFunction><muted>medium</muted>",
+			"<syntaxFunction>gpt-6-sol (fast)</syntaxFunction><syntaxFunction> – </syntaxFunction><muted>medium</muted>",
 		);
 		expect(
 			renderStyleForSource(theme, "theme", config.colors.editorBorder, "│"),
 		).toBe("<accent><bold>│</bold></accent>");
 		expect(
 			renderMinimalistModelThinking(
-				{ cwd: "", modelLabel: "gpt-5.6-sol (fast)", thinkingLevel: "off" },
+				{ cwd: "", modelLabel: "gpt-6-sol (fast)", thinkingLevel: "off" },
 				theme,
 				config,
 			),
-		).toBe("<syntaxFunction>gpt-5.6-sol (fast)</syntaxFunction>");
+		).toBe("<syntaxFunction>gpt-6-sol (fast)</syntaxFunction>");
 	});
 
 	it("composes model and workflow statuses first while retaining right telemetry", () => {
@@ -63,7 +63,7 @@ describe("inline footer metadata", () => {
 			colorModes: {},
 		};
 		const state = createInitialState(emptyGitStatus());
-		state.modelId = "gpt-5.6-sol";
+		state.modelId = "gpt-6-sol";
 		state.fast = true;
 		state.costLabel = "$0.00";
 		let createFooter:

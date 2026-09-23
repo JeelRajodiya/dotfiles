@@ -3,9 +3,8 @@
     "openai-codex": {
       "modelOverrides": {
         "gpt-6-astra": { "contextWindow": 500000 },
-        "gpt-5.6-sol": { "contextWindow": 500000 },
-        "gpt-5.6-terra": { "contextWindow": 500000 },
-        "gpt-5.6-luna": { "contextWindow": 500000 }
+        "gpt-6-sol": { "contextWindow": 500000 },
+        "gpt-6-luna": { "contextWindow": 500000 }
       }
     }
   }

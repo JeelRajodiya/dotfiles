@@ -97,15 +97,15 @@ export function annotateAgentCompletion(prefix: string, items: AutocompleteItem[
 	const command = parts[0];
 	const keyFor = (item: AutocompleteItem): string | undefined => {
 		if (!command || parts.length === 1 && !trailing) {
-			return new Set(["add", "tell", "interrupt", "clear", "clear-all-sub", "remove", "compact", "compact-all-sub", "promote", "list", "model", "fast", "variant", "auto-spawn", "queue", AGENT_VIEW_COMMAND, "grid", "team", "help", "demote", "exit"]).has(item.value)
+			return new Set(["add", "tell", "interrupt", "clear", "clear-all-sub", "remove", "compact", "compact-all-sub", "promote", "list", "model", "model-all-sub", "fast", "fast-all-sub", "variant", "auto-spawn", "queue", AGENT_VIEW_COMMAND, "grid", "team", "help", "demote", "exit"]).has(item.value)
 				? `agents.command.${item.value}` : undefined;
 		}
 		if (command === "add" && item.value === "add custom") return "agents.add.custom";
-		if (command === "fast" && /\s(?:on|off)$/.test(item.value)) return `agents.fast.${item.label}`;
+		if ((command === "fast" || command === "fast-all-sub") && /\s(?:on|off)$/.test(item.value)) return `agents.${command}.${item.label}`;
 		if (command === "variant") return `agents.variant.${item.label}`;
 		if (command === "auto-spawn" && /\s(?:on|off|limit)$/.test(item.value)) return `agents.auto-spawn.${item.label}`;
 		if (command === "queue" && /\s(?:edit|remove)$/.test(item.value)) return `agents.queue.${item.label}`;
-		if (command === "model" && /\sinherit$/.test(item.value)) return "agents.model.inherit";
+		if ((command === "model" || command === "model-all-sub") && /\sinherit$/.test(item.value)) return `agents.${command}.inherit`;
 		if (command === "grid" && /^[1-6]$/.test(item.label)) return `agents.grid.${item.label}`;
 		if (command === "team" && /\soff$/.test(item.value)) return "agents.team.off";
 		return undefined;
@@ -817,7 +817,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({ name: "interrupt_agent", label: "Interrupt Agent", description: "Immediately terminate a running child agent without sending it a prompt.", parameters: Type.Object({ agent: Type.String({ description: "Running child instance name" }) }), async execute(_id, params) { const state = interruptAgent((params as { agent: string }).agent); return { content: [{ type: "text", text: `${displayName(state.name)} interrupted.` }], details: { agent: state.name, status: state.status } }; } });
 	pi.registerTool({ name: "set_agent_model", label: "Set Agent Model", description: "Set a session model for a named dynamic instance.", parameters: Type.Object({ agent: Type.String(), model: Type.String() }), async execute(_id, params, _signal, _update, ctx) { const { agent, model } = params as { agent: string; model: string }; const state = stateFor(agent); if (!state) throw new Error(`Unknown dynamic instance "${agent}"`); if (state === rootAgent) throw new Error("Change the root model with /agents model <name> <model|inherit> when the host is idle"); return { content: [{ type: "text", text: `${state.name}: ${setInstanceModel(state, model, ctx)}` }], details: { agent: state.name } }; } });
 
-	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | interrupt <agent> | clear <subagent-name> | clear-all-sub | remove <name> | compact <name> | compact-all-sub | promote <instance|base> | demote | list | model <name> [model|inherit] | fast <name> [on|off] | variant [name] | auto-spawn <on|off|limit N> | queue [edit <id> <task|target> ...|remove <id>] | view <name> | exit | grid <1-6> | team <team-name|off>";
+	const usage = "Usage: /agents add <type|custom> [name] | tell <subagent-name> <message...> | interrupt <agent> | clear <subagent-name> | clear-all-sub | remove <name> | compact <name> | compact-all-sub | promote <instance|base> | demote | list | model <name> [model|inherit] | model-all-sub [model|inherit] | fast <name> [on|off] | fast-all-sub [on|off] | variant [name] | auto-spawn <on|off|limit N> | queue [edit <id> <task|target> ...|remove <id>] | view <name> | exit | grid <1-6> | team <team-name|off>";
 	const listInstances = (ctx: any) => ctx.ui.notify([...agentStates.values()].map(state => `${state === rootAgent ? "ROOT " : ""}${state.name} (${state.def.name}) — ${state.status}; goal: ${state.goal}`).join("\n") || "No instances", "info");
 	const availableModels = () => (widgetCtx?.modelRegistry?.getAvailable?.() ?? []).map((model: any) => `${model.provider}/${model.id}`);
 	const variantNames = (teamName = activeTeam) => teamName ? Object.keys(teams[teamName]?.variants ?? {}) : [];
@@ -913,7 +913,7 @@ export default function (pi: ExtensionAPI) {
 			const matches = choices.filter(value => value.toLowerCase().startsWith(current.toLowerCase())).map(value => ({ value: `${base}${value}`, label: value }));
 			return matches.length ? matches : null;
 		};
-		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "interrupt", "clear", "clear-all-sub", "remove", "compact", "compact-all-sub", "promote", "list", "model", "fast", "variant", "auto-spawn", "queue", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
+		if (!command || parts.length === 1 && !trailing) return values(["add", "tell", "interrupt", "clear", "clear-all-sub", "remove", "compact", "compact-all-sub", "promote", "list", "model", "model-all-sub", "fast", "fast-all-sub", "variant", "auto-spawn", "queue", AGENT_VIEW_COMMAND, "grid", "team", "help", ...(rootAgent ? ["demote"] : []), ...(viewedAgent ? ["exit"] : [])]);
 		if (command === "add" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...predefinedDefs().map(def => def.name), "custom"], "add ")?.map(item => item.label === "custom" ? { ...item, label: "Custom…" } : item) ?? null;
 		if (command === "tell" && shouldCompleteTellTarget(parts, trailing)) return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "waiting").map(state => state.name), "tell ");
 		if (command === "interrupt" && (parts.length === 1 && trailing || parts.length === 2 && !trailing)) return values([...agentStates.values()].filter(state => canInterruptAgent(state.status, state === rootAgent)).map(state => state.name), "interrupt ");
@@ -922,6 +922,7 @@ export default function (pi: ExtensionAPI) {
 			return values([...agentStates.values()].filter(state => state !== rootAgent && state.status !== "running" && state.status !== "waiting").map(state => state.name), "fast ");
 		}
 		if (command === "fast" && parts.length === 2 && trailing || command === "fast" && parts.length === 3 && !trailing) return values(["on", "off"], `fast ${parts[1]} `);
+		if (command === "fast-all-sub" && (parts.length === 1 && trailing || parts.length === 2 && !trailing)) return values(["on", "off"], "fast-all-sub ");
 		if (command === "variant" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(variantChoices(), "variant ");
 		if (command === "auto-spawn" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(["on", "off", "limit"], "auto-spawn ");
 		if (command === "queue" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(["edit", "remove"], "queue ");
@@ -939,6 +940,7 @@ export default function (pi: ExtensionAPI) {
 		if (isAgentViewCommand(command) && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].map(state => state.name), `${AGENT_VIEW_COMMAND} `);
 		if (command === "model" && (parts.length === 1 || parts.length === 2 && !trailing)) return values([...agentStates.values()].map(state => state.name), "model ");
 		if (command === "model" && parts.length === 2 && trailing || command === "model" && parts.length === 3 && !trailing) return values(["inherit", ...availableModels()], `model ${parts[1]} `);
+		if (command === "model-all-sub" && (parts.length === 1 && trailing || parts.length === 2 && !trailing)) return values(["inherit", ...availableModels()], "model-all-sub ");
 		if (command === "grid" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(["1", "2", "3", "4", "5", "6"], "grid ");
 		if (command === "team" && (parts.length === 1 || parts.length === 2 && !trailing)) return values(["off", ...Object.keys(teams)], "team ");
 		return null;
@@ -1030,6 +1032,31 @@ export default function (pi: ExtensionAPI) {
 				const enabled = mode ? mode === "on" : !effectiveFast(state, ctx);
 				setInstanceFast(state, enabled);
 				ctx.ui.notify(`${displayName(state.name)} fast mode ${enabled ? "enabled" : "disabled"}`, "info");
+				return;
+			}
+			if (command === "fast-all-sub") {
+				const mode = rest[0]?.toLowerCase();
+				if (rest.length > 1 || mode && mode !== "on" && mode !== "off") return void ctx.ui.notify("Usage: /agents fast-all-sub [on|off]", "error");
+				const subs = [...agentStates.values()].filter(state => state !== rootAgent);
+				const active = subs.filter(state => state.status === "running" || state.status === "waiting");
+				if (active.length) return void ctx.ui.notify(`Wait for active subagents to finish before changing fast mode: ${active.map(state => displayName(state.name)).join(", ")}.`, "error");
+				if (!subs.length) return void ctx.ui.notify("No subagents to change.", "info");
+				const enabled = mode ? mode === "on" : !subs.every(state => effectiveFast(state, ctx));
+				for (const state of subs) setInstanceFast(state, enabled);
+				ctx.ui.notify(`Fast mode ${enabled ? "enabled" : "disabled"} for ${subs.length} subagent${subs.length === 1 ? "" : "s"}.`, "info");
+				return;
+			}
+			if (command === "model-all-sub") {
+				if (rest.length > 1) return void ctx.ui.notify("Usage: /agents model-all-sub [model|inherit]", "error");
+				const subs = [...agentStates.values()].filter(state => state !== rootAgent);
+				const active = subs.filter(state => state.status === "running" || state.status === "waiting");
+				if (active.length) return void ctx.ui.notify(`Wait for active subagents to finish before changing models: ${active.map(state => displayName(state.name)).join(", ")}.`, "error");
+				if (!subs.length) return void ctx.ui.notify("No subagents to change.", "info");
+				let requested = rest[0];
+				if (!requested) { requested = await ctx.ui.select("Model for all subagents", ["inherit", ...availableModels()]); if (!requested) return; }
+				if (requested !== "inherit" && !resolveModel(requested, ctx)) return void ctx.ui.notify(`Unknown model "${requested}"`, "error");
+				for (const state of subs) setInstanceModel(state, requested, ctx);
+				ctx.ui.notify(`Model updated for ${subs.length} subagent${subs.length === 1 ? "" : "s"}.`, "info");
 				return;
 			}
 			if (command === "model") {

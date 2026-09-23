@@ -18,12 +18,12 @@ try {
 	} as any;
 	openAICodexFast(pi);
 	const ctx = {
-		model: { provider: "openai-codex", id: "gpt-5.6-sol" },
+		model: { provider: "openai-codex", id: "gpt-6-sol" },
 		sessionManager: { getEntries: () => [{ type: "custom", customType: "openai-fast-session", data: { enabled: false } }] },
 		ui: { notify: () => {} },
 	};
 	handlers.get("session_start")!({}, ctx);
-	const request = () => handlers.get("before_provider_request")!({ payload: { model: "gpt-5.6-sol" } }, ctx).service_tier;
+	const request = () => handlers.get("before_provider_request")!({ payload: { model: "gpt-6-sol" } }, ctx).service_tier;
 	assert.equal(request(), "default", "restored session override wins over the inherited/global setting");
 
 	events.emit(OPENAI_FAST_SESSION_EVENT, { enabled: true });

@@ -20,13 +20,15 @@ try {
 	const fastEvents: unknown[] = [];
 	const notifications: string[] = [];
 	const selections: string[] = [];
+	const selectionOptions: string[][] = [];
+	let selectedValue: string | undefined;
 	const modelChanges: string[] = [];
 	const thinkingChanges: string[] = [];
 	let seededEntries: any[] = [];
 	let autocompleteProvider: any;
 	const events = new EventEmitter();
 	events.on(OPENAI_FAST_SESSION_EVENT, event => fastEvents.push(event));
-	const models = ["sol", "terra", "luna"].map(name => ({ provider: "openai-codex", id: `gpt-5.6-${name}`, contextWindow: 1000 }));
+	const models = ["astra", "sol", "luna"].map(name => ({ provider: "openai-codex", id: `gpt-6-${name}`, contextWindow: 1000 }));
 	const ctx: any = {
 		cwd: process.cwd(),
 		model: models[0],
@@ -39,7 +41,7 @@ try {
 		ui: {
 			addAutocompleteProvider: (provider: any) => { autocompleteProvider = provider; }, setStatus: () => {}, setWidget: () => {},
 			notify: (message: string) => notifications.push(message),
-			select: async (message: string) => { selections.push(message); return message === "Switch team session?" ? "start fresh" : undefined; },
+			select: async (message: string, options: string[] = []) => { selections.push(message); selectionOptions.push(options); return message === "Switch team session?" ? "start fresh" : selectedValue; },
 		},
 		isIdle: () => true,
 		waitForIdle: async () => {},
@@ -65,35 +67,58 @@ try {
 	const run = (args: string) => commands.get("agents").handler(args, ctx);
 	const savedVariant = () => entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data.variant;
 
-	assert.equal(ctx.model.id, "gpt-5.6-terra", "fresh startup selects balanced-terra automatically");
+	assert.equal(ctx.model.id, "gpt-6-sol", "fresh startup selects balanced automatically");
 	assert.equal(thinkingChanges.at(-1), "medium");
 	assert.deepEqual(fastEvents.at(-1), { enabled: false });
-	assert.equal(savedVariant(), "balanced-terra", "the resolved default variant is persisted");
+	assert.equal(savedVariant(), "balanced", "the resolved default variant is persisted");
 	const autocomplete = autocompleteProvider({ getSuggestions: () => null });
 	const variantSuggestions = await autocomplete.getSuggestions(["/agents variant "], 0, 16, { force: true });
-	assert.ok(variantSuggestions.items.some((item: any) => item.label === "balanced-terra"));
+	assert.ok(variantSuggestions.items.some((item: any) => item.label === "balanced"));
 	assert.ok(!variantSuggestions.items.some((item: any) => item.label === "default"), "default is a hidden compatibility alias");
+	const fastAllSuggestions = await autocomplete.getSuggestions(["/agents fast-all-sub "], 0, 21, { force: true });
+	assert.deepEqual(fastAllSuggestions.items.map((item: any) => item.label), ["on", "off"]);
+	const modelAllSuggestions = await autocomplete.getSuggestions(["/agents model-all-sub "], 0, 22, { force: true });
+	assert.ok(modelAllSuggestions.items.some((item: any) => item.label === "inherit"));
+	await run("fast-all-sub on");
+	let fastOverrides = entries.filter(entry => entry.customType === "agent-team-fast-overrides").at(-1).data.overrides;
+	assert.deepEqual(fastOverrides, { tracer: true, worker: true, reviewer: true }, "bulk fast enables every subagent and excludes root");
+	await run("fast-all-sub");
+	fastOverrides = entries.filter(entry => entry.customType === "agent-team-fast-overrides").at(-1).data.overrides;
+	assert.deepEqual(fastOverrides, { tracer: false, worker: false, reviewer: false }, "bare bulk fast toggles all-on to off");
+	selectedValue = "openai-codex/gpt-6-luna";
+	await run("model-all-sub");
+	assert.equal(selections.at(-1), "Model for all subagents");
+	assert.ok(selectionOptions.at(-1)!.includes(selectedValue), "bulk model selector uses available models");
+	let modelOverrides = entries.filter(entry => entry.customType === "agent-team-model-overrides").at(-1).data.overrides;
+	assert.deepEqual(modelOverrides, { tracer: selectedValue, worker: selectedValue, reviewer: selectedValue }, "bulk model changes every subagent and excludes root");
+	const overrideEntries = entries.filter(entry => entry.customType === "agent-team-model-overrides").length;
+	await run("model-all-sub missing/model");
+	assert.equal(entries.filter(entry => entry.customType === "agent-team-model-overrides").length, overrideEntries, "an invalid bulk model leaves all overrides unchanged");
+	await run("model-all-sub inherit");
+	modelOverrides = entries.filter(entry => entry.customType === "agent-team-model-overrides").at(-1).data.overrides;
+	assert.deepEqual(modelOverrides, {}, "bulk inherit clears existing subagent overrides");
+	selectedValue = undefined;
 	await run("team default");
 	const seededTeam = seededEntries.find(entry => entry.customType === "agent-team-instances").data;
-	assert.deepEqual(seededTeam.rootBaseline, { model: "openai-codex/gpt-5.6-terra", thinking: "medium", fast: false });
-	assert.equal(seededTeam.variant, "balanced-terra");
+	assert.deepEqual(seededTeam.rootBaseline, { model: "openai-codex/gpt-6-sol", thinking: "medium", fast: false });
+	assert.equal(seededTeam.variant, "balanced");
 	entries.splice(0, entries.length, ...seededEntries);
 	await handlers.get("session_start")!({}, ctx);
-	assert.equal(savedVariant(), "balanced-terra", "a seeded team snapshot restores its configured default variant");
+	assert.equal(savedVariant(), "balanced", "a seeded team snapshot restores its configured default variant");
 	await run("model worker");
-	assert.match(selections.at(-1)!, /gpt-5\.6-terra \(variant\)/, "child settings use the active variant");
+	assert.match(selections.at(-1)!, /gpt-6-luna \(variant\)/, "child settings use the active variant");
 
-	await run("variant balanced-terra-fast");
-	assert.equal(ctx.model.id, "gpt-5.6-terra", "a Terra root remains Terra in a fast variant");
-	assert.deepEqual(fastEvents.at(-1), { enabled: true }, "a Terra root enables fast mode in a -fast variant");
-	assert.equal(savedVariant(), "balanced-terra-fast", "selected variants persist");
+	await run("variant turbo-sol-fast");
+	assert.equal(ctx.model.id, "gpt-6-sol", "a Sol root remains Sol in a turbo fast variant");
+	assert.deepEqual(fastEvents.at(-1), { enabled: true }, "a Sol root enables fast mode in a turbo fast variant");
+	assert.equal(savedVariant(), "turbo-sol-fast", "selected variants persist");
 	await handlers.get("session_start")!({}, ctx);
 	assert.deepEqual(fastEvents.at(-1), { enabled: true }, "the persisted fast variant restores on startup");
 
 	await run("variant default");
-	assert.equal(ctx.model.id, "gpt-5.6-terra", "default resolves to balanced-terra");
+	assert.equal(ctx.model.id, "gpt-6-sol", "default resolves to balanced");
 	assert.deepEqual(fastEvents.at(-1), { enabled: false });
-	assert.equal(savedVariant(), "balanced-terra", "default persists the configured variant");
+	assert.equal(savedVariant(), "balanced", "default persists the configured variant");
 
 	// A pre-default snapshot migrates once while the host is still on its original settings.
 	entries.splice(0, entries.length, {
@@ -105,15 +130,15 @@ try {
 	ctx.model = models[0];
 	await handlers.get("session_start")!({}, ctx);
 	const migrated = entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data;
-	assert.equal(migrated.variant, "balanced-terra", "a snapshot without a variant persists the configured default");
-	assert.deepEqual(migrated.rootBaseline, { model: "openai-codex/gpt-5.6-sol", thinking: "medium", fast: false });
+	assert.equal(migrated.variant, "balanced", "a snapshot without a variant persists the configured default");
+	assert.deepEqual(migrated.rootBaseline, { model: "openai-codex/gpt-6-astra", thinking: "medium", fast: false });
 	await handlers.get("session_start")!({}, ctx);
 	const restored = entries.filter(entry => entry.customType === "agent-team-instances").at(-1).data;
-	assert.equal(restored.variant, "balanced-terra", "the migrated variant remains stable on reload");
+	assert.equal(restored.variant, "balanced", "the migrated variant remains stable on reload");
 	assert.deepEqual(restored.rootBaseline, migrated.rootBaseline, "reload keeps the original pre-variant baseline");
 
 	await run("variant missing");
-	assert.match(notifications.at(-1)!, /Unknown variant.*quality-sol.*turbo-plus-terra-fast/);
+	assert.match(notifications.at(-1)!, /Unknown variant.*quality.*turbo-plus-sol-fast/);
 
 	entries.splice(0, entries.length, { type: "custom", customType: "agent-team-instances", data: { instances: [], team: "rootless" } });
 	await handlers.get("session_start")!({}, ctx);

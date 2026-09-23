@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Code review and quality checks
-model: openai-codex/gpt-5.6-sol
+model: openai-codex/gpt-6-astra
 thinking: medium
 fast: false
 limitations: Read-only review; do not modify files.

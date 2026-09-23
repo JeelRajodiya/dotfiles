@@ -41,16 +41,18 @@ const capped = parseUsageEvents(Array.from({ length: MAX_COMPLETION_USAGE_KEYS +
 assert.equal(capped.size, MAX_COMPLETION_USAGE_KEYS);
 assert.equal(capped.has("test.key.0") && capped.has(`test.key.${MAX_COMPLETION_USAGE_KEYS}`), false, "completion key cap is deterministic");
 
-const topLevel = annotateAgentCompletion("", [{ value: "add", label: "add" }, { value: "queue", label: "queue" }, { value: "tell", label: "tell" }]);
-assert.deepEqual(topLevel.map(item => (item as UsageAutocompleteItem).usageKey), ["agents.command.add", "agents.command.queue", "agents.command.tell"]);
+const topLevel = annotateAgentCompletion("", [{ value: "add", label: "add" }, { value: "fast-all-sub", label: "fast-all-sub" }, { value: "model-all-sub", label: "model-all-sub" }, { value: "queue", label: "queue" }, { value: "tell", label: "tell" }]);
+assert.deepEqual(topLevel.map(item => (item as UsageAutocompleteItem).usageKey), ["agents.command.add", "agents.command.fast-all-sub", "agents.command.model-all-sub", "agents.command.queue", "agents.command.tell"]);
 assert.equal((annotateAgentCompletion("add ", [{ value: "add custom", label: "Custom…" }])[0] as UsageAutocompleteItem).usageKey, "agents.add.custom");
 const staticItems = annotateAgentCompletion("fast agent-7 ", [{ value: "fast agent-7 on", label: "on" }, { value: "fast agent-7 off", label: "off" }]);
 assert.deepEqual(staticItems.map(item => (item as UsageAutocompleteItem).usageKey), ["agents.fast.on", "agents.fast.off"]);
+assert.deepEqual(annotateAgentCompletion("fast-all-sub ", [{ value: "fast-all-sub on", label: "on" }, { value: "fast-all-sub off", label: "off" }]).map(item => (item as UsageAutocompleteItem).usageKey), ["agents.fast-all-sub.on", "agents.fast-all-sub.off"]);
 assert.deepEqual(annotateAgentCompletion("auto-spawn ", [{ value: "auto-spawn on", label: "on" }, { value: "auto-spawn limit", label: "limit" }]).map(item => (item as UsageAutocompleteItem).usageKey), ["agents.auto-spawn.on", "agents.auto-spawn.limit"]);
 assert.deepEqual(annotateAgentCompletion("grid ", [{ value: "grid 1", label: "1" }, { value: "grid 6", label: "6" }]).map(item => (item as UsageAutocompleteItem).usageKey), ["agents.grid.1", "agents.grid.6"]);
 assert.equal((annotateAgentCompletion("team ", [{ value: "team off", label: "off" }])[0] as UsageAutocompleteItem).usageKey, "agents.team.off");
 assert.equal((annotateAgentCompletion("tell ", [{ value: "tell agent-7", label: "agent-7" }])[0] as UsageAutocompleteItem).usageKey, undefined, "agent names stay dynamic");
 assert.equal((annotateAgentCompletion("model agent-7 ", [{ value: "model agent-7 inherit", label: "inherit" }])[0] as UsageAutocompleteItem).usageKey, "agents.model.inherit");
+assert.equal((annotateAgentCompletion("model-all-sub ", [{ value: "model-all-sub inherit", label: "inherit" }])[0] as UsageAutocompleteItem).usageKey, "agents.model-all-sub.inherit");
 assert.equal((annotateAgentCompletion("model agent-7 ", [{ value: "model agent-7 vendor/model", label: "vendor/model" }])[0] as UsageAutocompleteItem).usageKey, undefined, "models stay dynamic");
 assert.equal((annotateAgentCompletion("queue edit id-7 task ", [{ value: "queue edit id-7 task private", label: "private" }])[0] as UsageAutocompleteItem).usageKey, undefined, "queue IDs and task text stay dynamic");
 
