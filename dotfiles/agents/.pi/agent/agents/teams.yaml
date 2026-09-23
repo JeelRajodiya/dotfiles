@@ -24,6 +24,19 @@ default:
       orchestrator:
         model: openai-codex/gpt-6-sol
         thinking: high
+    balanced-sol-review:
+      all:
+        model: openai-codex/gpt-6-luna
+        thinking: high
+        fast: false
+      orchestrator:
+        model: openai-codex/gpt-6-sol
+        thinking: high
+      tracer:
+        thinking: medium
+      reviewer:
+        model: openai-codex/gpt-6-sol
+        thinking: high
     balanced-astra:
       all:
         model: openai-codex/gpt-6-luna
