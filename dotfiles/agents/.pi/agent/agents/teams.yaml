@@ -19,115 +19,15 @@ default:
     balanced:
       all:
         model: openai-codex/gpt-6-luna
-        thinking: medium
+        thinking: max
         fast: false
       orchestrator:
         model: openai-codex/gpt-6-sol
+        thinking: medium
     economy:
       all:
         model: openai-codex/gpt-6-luna
-        thinking: medium
-        fast: false
-    sprint-astra:
-      all:
-        model: openai-codex/gpt-5.3-codex-spark
-        thinking: medium
-        fast: false
-      orchestrator:
-        model: openai-codex/gpt-6-astra
-      tracer:
-        model: openai-codex/gpt-6-sol
-    sprint-astra-fast:
-      all:
-        model: openai-codex/gpt-5.3-codex-spark
-        thinking: medium
-        fast: false
-      orchestrator:
-        model: openai-codex/gpt-6-astra
-      tracer:
-        model: openai-codex/gpt-6-sol
-        fast: true
-    turbo-astra:
-      all:
-        model: openai-codex/gpt-6-astra
-        thinking: medium
-        fast: false
-      worker:
-        model: openai-codex/gpt-5.3-codex-spark
-    turbo-astra-fast:
-      all:
-        model: openai-codex/gpt-6-astra
-        thinking: medium
-        fast: true
-      orchestrator:
-        fast: false
-      worker:
-        model: openai-codex/gpt-5.3-codex-spark
-        fast: false
-    turbo-sol:
-      all:
-        model: openai-codex/gpt-6-astra
-        thinking: medium
-        fast: false
-      orchestrator:
-        model: openai-codex/gpt-6-sol
-      worker:
-        model: openai-codex/gpt-5.3-codex-spark
-    turbo-sol-fast:
-      all:
-        model: openai-codex/gpt-6-astra
-        thinking: medium
-        fast: true
-      orchestrator:
-        model: openai-codex/gpt-6-sol
-      worker:
-        model: openai-codex/gpt-5.3-codex-spark
-        fast: false
-    turbo-plus-astra:
-      all:
-        model: openai-codex/gpt-6-astra
-        thinking: medium
-        fast: false
-      tracer:
-        model: openai-codex/gpt-5.3-codex-spark
-      worker:
-        model: openai-codex/gpt-5.3-codex-spark
-    turbo-plus-astra-fast:
-      all:
-        model: openai-codex/gpt-6-astra
-        thinking: medium
-        fast: true
-      orchestrator:
-        fast: false
-      tracer:
-        model: openai-codex/gpt-5.3-codex-spark
-        fast: false
-      worker:
-        model: openai-codex/gpt-5.3-codex-spark
-        fast: false
-    turbo-plus-sol:
-      all:
-        model: openai-codex/gpt-6-astra
-        thinking: medium
-        fast: false
-      orchestrator:
-        model: openai-codex/gpt-6-sol
-      tracer:
-        model: openai-codex/gpt-5.3-codex-spark
-      worker:
-        model: openai-codex/gpt-5.3-codex-spark
-    turbo-plus-sol-fast:
-      all:
-        model: openai-codex/gpt-6-astra
-        thinking: medium
-        fast: true
-      orchestrator:
-        model: openai-codex/gpt-6-sol
-      tracer:
-        model: openai-codex/gpt-5.3-codex-spark
-        fast: false
-      worker:
-        model: openai-codex/gpt-5.3-codex-spark
+        thinking: max
         fast: false
 
 plan-build:
